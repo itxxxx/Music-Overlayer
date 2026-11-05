@@ -65,49 +65,6 @@ From then on, every change you make in the overlay is applied instantly. Some th
 
   Tray → **Equalizer engine** → **Unlink Music Overlayer** removes these lines.
 
-## Publish to GitHub (first time)
-
-The install command downloads the newest release from https://github.com/itxxxx/Music-Overlayer. Releases are built automatically by GitHub Actions (`.github/workflows/release.yml`) every time a version tag is pushed.
-
-You need [Git for Windows](https://git-scm.com/download/win). Then run these in the project folder:
-
-```powershell
-cd "D:\Dev\Music player"
-
-# Put the release workflow where GitHub looks for it (only if release.yml is in this folder)
-mkdir .github\workflows
-move release.yml .github\workflows\release.yml
-
-git init
-git add .
-git commit -m "Music Overlayer 1.0.0"
-git branch -M main
-git remote add origin https://github.com/itxxxx/Music-Overlayer.git
-
-# The repo already has a README commit: merge it in, keeping this project's README
-git pull origin main --allow-unrelated-histories --no-edit -X ours
-git push -u origin main
-
-# Publish version 1.0.0
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-Some notes on these commands:
-- The first `git push` opens a GitHub sign-in in your browser.
-- If `git commit` asks who you are, run `git config --global user.name "ITX"` and `git config --global user.email "<your email>"`, then commit again.
-- If the pull stops with a conflict in `README.md`, run `git checkout --ours README.md`, then `git add README.md`, then `git commit --no-edit`.
-
-After the tag is pushed, open the repo's **Actions** tab. The *Release* run takes about 5–10 minutes, then the installer and the portable `.exe` appear under **Releases**. The install command works from that moment.
-
-### Next versions
-
-1. Change `"version"` in `package.json`, for example to `1.1.0`.
-2. Run `git commit -am "1.1.0"`, then `git push`.
-3. Run `git tag v1.1.0`, then `git push origin v1.1.0`.
-
-People get the update by running the install command again.
-
 ## Develop
 
 You need [Node.js](https://nodejs.org) 22.12 or newer.

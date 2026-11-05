@@ -1,0 +1,35 @@
+appId: com.itx.musicoverlayer
+productName: Music Overlayer
+copyright: Made by ITX
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - out/**/*
+extraResources:
+  - from: resources/media-bridge.ps1
+    to: media-bridge.ps1
+  - from: resources/tray.ico
+    to: tray.ico
+  - from: resources/tray.png
+    to: tray.png
+asar: true
+npmRebuild: false
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Music Overlayer
+  # No spaces: GitHub renames release files that contain them.
+  artifactName: MusicOverlayer-Setup-${version}.${ext}
+portable:
+  artifactName: MusicOverlayer-${version}-portable.${ext}

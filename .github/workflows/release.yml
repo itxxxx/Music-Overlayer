@@ -1,0 +1,43 @@
+# Builds the Windows installer and publishes it as a GitHub release whenever a version tag is
+# pushed (for example: git tag v1.0.0 && git push origin v1.0.0). The one-line install command
+# in the README downloads the newest release from here.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build installer and portable app
+        run: npm run dist
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=(dist/MusicOverlayer-*.exe)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "Music Overlayer $GITHUB_REF_NAME" --generate-notes
+          fi

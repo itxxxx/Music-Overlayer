@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { MediaCover } from '../../../shared/types'
-import { DEFAULT_PALETTE, extractPalette, type Palette } from '@/lib/palette'
+import { DEFAULT_PALETTE, extractPalette, makeBackdrop, type Palette } from '@/lib/palette'
 
 const ARTWORK_GRACE_MS = 1500
 
@@ -25,6 +25,24 @@ export function useDisplayedCover(trackKey: string | null, cover: MediaCover | n
     return () => window.clearTimeout(timer)
   }, [trackKey, cover])
   return shown
+}
+
+/** The blurred backdrop for the artwork, or null while there's none (or it's being made). */
+export function useBackdrop(src: string | null, width: number, height: number): string | null {
+  const [backdrop, setBackdrop] = useState<{ src: string; url: string } | null>(null)
+  useEffect(() => {
+    if (!src) return
+    let cancelled = false
+    makeBackdrop(src, width, height)
+      .then((url) => {
+        if (!cancelled) setBackdrop({ src, url })
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [src, width, height])
+  return src && backdrop?.src === src ? backdrop.url : null
 }
 
 /** Colours sampled from the artwork; keeps the previous palette while new artwork loads. */

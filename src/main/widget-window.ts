@@ -3,7 +3,11 @@ import path from 'node:path'
 import { APP_NAME, GEOMETRY, PILL_TOP, type ExpandDirection, type HitRect, type PillPosition } from '../shared/types'
 
 const EDGE_GAP = 8
-const POLL_MS = 40
+/** Cursor checks: often near the widget, rarely when the cursor is far away or the widget is hidden. */
+const POLL_NEAR_MS = 40
+const POLL_FAR_MS = 150
+const POLL_HIDDEN_MS = 500
+const NEAR_DISTANCE = 140
 const LEAVE_GRACE_MS = 250
 const POINTER_HOLD_LIMIT_MS = 15_000
 
@@ -11,6 +15,7 @@ interface WidgetWindowOptions {
   getPosition(): PillPosition | null
   savePosition(position: PillPosition): void
   onDirectionChange?(direction: ExpandDirection): void
+  onVisibilityChange?(visible: boolean): void
 }
 
 /**
@@ -71,6 +76,8 @@ export class WidgetWindow {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     win.setIgnoreMouseEvents(true, { forward: true })
 
+    // Starting hidden (from the tray): let the page sleep until it's shown.
+    if (!showOnReady) win.webContents.setBackgroundThrottling(true)
     win.once('ready-to-show', () => {
       if (showOnReady) this.show()
     })
@@ -98,14 +105,22 @@ export class WidgetWindow {
 
   show(): void {
     if (!this.win || this.win.isDestroyed()) return
+    // Hidden, the page may sleep; shown, its animations and timers must run at full speed.
+    this.win.webContents.setBackgroundThrottling(false)
     this.win.showInactive()
     this.win.setAlwaysOnTop(true, 'screen-saver')
     this.win.moveTop()
+    this.send('widget:visibility', true)
+    this.options.onVisibilityChange?.(true)
   }
 
   hide(): void {
     this.setInteractive(false)
-    this.win?.hide()
+    if (!this.win || this.win.isDestroyed()) return
+    this.send('widget:visibility', false)
+    this.win.webContents.setBackgroundThrottling(true)
+    this.win.hide()
+    this.options.onVisibilityChange?.(false)
   }
 
   setInteractive(interactive: boolean): void {
@@ -252,25 +267,35 @@ export class WidgetWindow {
    */
   private startPolling(): void {
     this.stopPolling()
-    this.pollTimer = setInterval(() => this.poll(), POLL_MS)
+    const loop = (): void => {
+      let delay = POLL_NEAR_MS
+      try {
+        delay = this.poll()
+      } finally {
+        this.pollTimer = setTimeout(loop, delay)
+      }
+    }
+    this.pollTimer = setTimeout(loop, POLL_NEAR_MS)
   }
 
   private stopPolling(): void {
-    if (this.pollTimer) clearInterval(this.pollTimer)
+    if (this.pollTimer) clearTimeout(this.pollTimer)
     this.pollTimer = null
   }
 
-  private poll(): void {
+  /** Returns how long to wait before the next check. */
+  private poll(): number {
     const win = this.win
     const rect = this.hitRect
-    if (!win || win.isDestroyed() || !win.isVisible() || this.dragging || !rect) return
+    if (!win || win.isDestroyed() || !win.isVisible()) return POLL_HIDDEN_MS
+    if (this.dragging || !rect) return POLL_NEAR_MS
     const point = screen.getCursorScreenPoint()
     const bounds = win.getBounds()
-    const inside =
-      point.x >= bounds.x + rect.x - 2 &&
-      point.x <= bounds.x + rect.x + rect.width + 2 &&
-      point.y >= bounds.y + rect.y - 2 &&
-      point.y <= bounds.y + rect.y + rect.height + 2
+    const left = bounds.x + rect.x
+    const top = bounds.y + rect.y
+    const dx = Math.max(left - point.x, 0, point.x - (left + rect.width))
+    const dy = Math.max(top - point.y, 0, point.y - (top + rect.height))
+    const inside = dx <= 2 && dy <= 2
 
     if (inside) {
       this.outsideSince = 0
@@ -278,18 +303,20 @@ export class WidgetWindow {
         this.setInteractive(true)
         this.send('widget:pointer', 'enter')
       }
-      return
+      return POLL_NEAR_MS
     }
+    const near = dx < NEAR_DISTANCE && dy < NEAR_DISTANCE
     // A held slider keeps the mouse; a press whose release was never seen stops counting after a while.
     const holding = this.pointerActive && Date.now() - this.pointerActiveSince < POINTER_HOLD_LIMIT_MS
     if (!this.interactive || holding) {
       this.outsideSince = 0
-      return
+      return near || this.interactive ? POLL_NEAR_MS : POLL_FAR_MS
     }
     if (!this.outsideSince) this.outsideSince = Date.now()
     else if (Date.now() - this.outsideSince > LEAVE_GRACE_MS) {
       this.setInteractive(false)
       this.send('widget:pointer', 'leave')
     }
+    return POLL_NEAR_MS
   }
 }

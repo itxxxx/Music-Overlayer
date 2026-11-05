@@ -3,11 +3,13 @@ import { cn } from '@/lib/utils'
 
 interface MarqueeTextProps {
   text: string
+  /** Scroll only while it can be seen; a hidden marquee would keep the GPU busy for nothing. */
+  active?: boolean
   className?: string
 }
 
 /** One line of text that slowly scrolls back and forth when it doesn't fit. */
-export function MarqueeText({ text, className }: MarqueeTextProps) {
+export function MarqueeText({ text, active = true, className }: MarqueeTextProps) {
   const outer = useRef<HTMLDivElement>(null)
   const inner = useRef<HTMLSpanElement>(null)
   const [overflow, setOverflow] = useState(0)
@@ -26,7 +28,7 @@ export function MarqueeText({ text, className }: MarqueeTextProps) {
     return () => observer.disconnect()
   }, [text])
 
-  const style: CSSProperties | undefined = overflow
+  const style: CSSProperties | undefined = overflow && active
     ? ({
         animation: `marquee ${Math.max(7, overflow / 18 + 5).toFixed(1)}s ease-in-out infinite alternate`,
         '--marquee-distance': `-${overflow}px`

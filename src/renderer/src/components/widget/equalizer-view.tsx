@@ -1,5 +1,6 @@
 import { ChevronLeft, LoaderCircle, Plus, RefreshCw, X } from 'lucide-react'
 import type { ReactNode } from 'react'
+import type { EqTarget } from '../../../../shared/types'
 import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EQ_PRESETS, PREAMP_MAX_DB, PREAMP_MIN_DB, formatBand } from '../../../../shared/eq'
 import { RangeSlider } from '@/components/ui/range-slider'
 import { ResponseCurve } from '@/components/ui/response-curve'
@@ -33,15 +34,52 @@ function StatusAction({ onClick, children }: { onClick(): void; children: ReactN
   )
 }
 
+const TARGETS: Array<{ id: EqTarget; label: string; hint: string }> = [
+  { id: 'music', label: 'Music only', hint: 'Only the player shown here. Discord, games and everything else stay as they are.' },
+  { id: 'device', label: 'Everything', hint: 'Everything you hear on your speakers or headphones, voices in calls included.' }
+]
+
 export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
   const equalizer = useEqualizer()
-  const { eq, status, activePresetId } = equalizer
-  const live = status.connected && !status.error
+  const { eq, status, musicEq, activePresetId } = equalizer
+  const musicOnly = eq.target === 'music'
+  const live = musicOnly ? musicEq.cable && !musicEq.error : status.connected && !status.error
 
   let statusText: string
   let statusTone: 'live' | 'muted' | 'warn' | 'busy' = 'muted'
   let action: ReactNode = null
-  if (!status.supported) {
+  if (musicOnly) {
+    if (!musicEq.supported) {
+      statusText = 'The equalizer works on Windows.'
+    } else if (musicEq.installing) {
+      statusText = 'Setting up VB-CABLE. Allow it in the Windows prompts.'
+      statusTone = 'busy'
+    } else if (musicEq.error) {
+      statusText = musicEq.error
+      statusTone = 'warn'
+      action = (
+        <StatusAction onClick={() => (musicEq.cable ? equalizer.recheckCable() : void equalizer.installCable())}>
+          <RefreshCw className="size-3" strokeWidth={2.6} />
+          Try again
+        </StatusAction>
+      )
+    } else if (!musicEq.cable && musicEq.restartPending) {
+      statusText = 'Restart Windows to finish setting up VB-CABLE.'
+      statusTone = 'warn'
+      action = <StatusAction onClick={equalizer.recheckCable}>Check again</StatusAction>
+    } else if (!musicEq.cable) {
+      statusText = 'One-time setup: installs VB-CABLE, a free virtual audio cable, so only your music is equalized.'
+      statusTone = 'warn'
+      action = <StatusAction onClick={() => void equalizer.installCable()}>Set up</StatusAction>
+    } else if (!eq.enabled) {
+      statusText = 'Equalizer is off'
+    } else if (musicEq.active) {
+      statusText = `Equalizing ${musicEq.active} only`
+      statusTone = 'live'
+    } else {
+      statusText = 'Ready. It equalizes the player shown here while it plays.'
+    }
+  } else if (!status.supported) {
     statusText = 'The equalizer works on Windows.'
   } else if (status.installing) {
     statusText = 'Setting up the equalizer. Follow the setup window and tick your speakers or headphones.'
@@ -66,7 +104,7 @@ export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
     statusText = 'Restart Windows to finish setting up the equalizer.'
     statusTone = 'warn'
   } else if (eq.enabled) {
-    statusText = 'Applied to everything you hear'
+    statusText = 'Applied to everything you hear, voices in calls included'
     statusTone = 'live'
   } else {
     statusText = 'Equalizer is off'
@@ -96,6 +134,30 @@ export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
           tint={palette.tint}
           tintInk={palette.tintInk}
         />
+      </div>
+
+      <div className="mt-2 flex gap-1 rounded-full bg-black/25 p-[3px] ring-1 ring-inset ring-white/[0.06]" role="radiogroup" aria-label="What the equalizer changes">
+        {TARGETS.map((target) => {
+          const selected = eq.target === target.id
+          return (
+            <button
+              key={target.id}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              data-no-drag
+              title={target.hint}
+              onClick={() => equalizer.setTarget(target.id)}
+              className={cn(
+                'h-7 flex-1 rounded-full text-[12px] font-bold transition-colors',
+                !selected && 'text-white/70 hover:bg-white/10 hover:text-white'
+              )}
+              style={selected ? { background: palette.tint, color: palette.tintInk } : undefined}
+            >
+              {target.label}
+            </button>
+          )
+        })}
       </div>
 
       <div className="mt-1.5 flex min-h-7 items-center gap-2 pl-1">
@@ -231,6 +293,7 @@ export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
           )
         })}
       </div>
+
     </div>
   )
 }

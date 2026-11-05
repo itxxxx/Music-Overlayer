@@ -30,9 +30,11 @@ export function NowPlayingPill({ title, subtitle, cover, palette, visualizerActi
         minHz={60}
         maxHz={9000}
         floor={0.16}
-        className="h-[22px] w-[29px] shrink-0 gap-[3px]"
-        barClassName="w-[3.4px] rounded-full"
-        barStyle={{ background: palette.tint }}
+        className="h-[22px] w-[29px] shrink-0"
+        color={palette.tint}
+        gap={3}
+        barWidth={3.4}
+        round
       />
     </div>
   )

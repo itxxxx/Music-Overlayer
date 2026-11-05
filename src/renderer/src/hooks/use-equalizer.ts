@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { EQ_PRESETS } from '../../../shared/eq'
-import type { EqSettings } from '../../../shared/types'
+import type { EqSettings, EqTarget } from '../../../shared/types'
 import { getState, setState, useWidget } from '@/lib/store'
 
 const APPLY_DELAY_MS = 60
@@ -12,6 +12,7 @@ function sameGains(a: readonly number[], b: readonly number[]): boolean {
 export function useEqualizer() {
   const eq = useWidget((state) => state.eq)
   const status = useWidget((state) => state.eqStatus)
+  const musicEq = useWidget((state) => state.musicEq)
   const timer = useRef(0)
 
   useEffect(() => () => window.clearTimeout(timer.current), [])
@@ -37,6 +38,7 @@ export function useEqualizer() {
   return {
     eq,
     status,
+    musicEq,
     activePresetId,
     setGain: (index: number, value: number) =>
       update((current) => ({
@@ -46,6 +48,7 @@ export function useEqualizer() {
       })),
     setPreamp: (preamp: number) => update((current) => ({ ...current, preamp })),
     setEnabled: (enabled: boolean) => update((current) => ({ ...current, enabled })),
+    setTarget: (target: EqTarget) => update((current) => ({ ...current, target })),
     applyPreset: (id: string) =>
       update((current) => {
         const preset = [...EQ_PRESETS, ...current.userPresets].find((p) => p.id === id)
@@ -67,6 +70,8 @@ export function useEqualizer() {
     connect: async () => setState({ eqStatus: await window.musicWidget.eq.connect() }),
     install: async () => setState({ eqStatus: await window.musicWidget.eq.install() }),
     recheck: async () => setState({ eqStatus: await window.musicWidget.eq.refreshStatus() }),
-    download: () => window.musicWidget.eq.openDownloadPage()
+    download: () => window.musicWidget.eq.openDownloadPage(),
+    installCable: async () => setState({ musicEq: await window.musicWidget.musicEq.install() }),
+    recheckCable: () => window.musicWidget.musicEq.recheck()
   }
 }

@@ -7,7 +7,9 @@ import type {
   InitialState,
   MediaCommand,
   MediaCover,
+  MediaRefusal,
   MediaSession,
+  MusicEqStatus,
   WidgetCommand,
   WidgetSettings
 } from './types'
@@ -22,6 +24,8 @@ export interface WidgetApi {
   onMediaSession(listener: (session: MediaSession | null) => void): Unsubscribe
   onMediaCover(listener: (cover: MediaCover) => void): Unsubscribe
   onBridgeStatus(listener: (status: BridgeStatus) => void): Unsubscribe
+  /** The player turned a command down (shuffle, repeat, volume...). */
+  onMediaRefused(listener: (refusal: MediaRefusal) => void): Unsubscribe
   sendMediaCommand(command: MediaCommand): void
 
   /** Let the window take mouse input (true) or pass clicks through to apps below (false). */
@@ -37,6 +41,8 @@ export interface WidgetApi {
   onPointer(listener: (event: 'enter' | 'leave') => void): Unsubscribe
   onCommand(listener: (command: WidgetCommand) => void): Unsubscribe
   onSettings(listener: (settings: WidgetSettings) => void): Unsubscribe
+  /** The widget was hidden or shown from the tray. */
+  onVisibility(listener: (visible: boolean) => void): Unsubscribe
   /** Ask the main process to (re)start system-audio capture for the visualizer. */
   requestAudioCapture(): void
 
@@ -48,5 +54,18 @@ export interface WidgetApi {
     refreshStatus(): Promise<EqStatus>
     openDownloadPage(): void
     onStatus(listener: (status: EqStatus) => void): Unsubscribe
+  }
+
+  /** The music-only equalizer (VB-CABLE). */
+  musicEq: {
+    /** Download and run VB-CABLE's setup. Resolves when it closes. */
+    install(): Promise<MusicEqStatus>
+    /** Look for VB-CABLE again. */
+    recheck(): void
+    openDownloadPage(): void
+    onStatus(listener: (status: MusicEqStatus) => void): Unsubscribe
+    /** The main process asks the window to start (true) or stop its audio path. */
+    onPipeline(listener: (run: boolean) => void): Unsubscribe
+    reportPipeline(state: { running: boolean; error?: string }): void
   }
 }

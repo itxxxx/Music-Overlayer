@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { existsSync, promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -6,6 +6,7 @@ import { app, net, shell } from 'electron'
 import { buildApoConfig, presetName } from '../../shared/eq'
 import type { EqSettings, EqStatus } from '../../shared/types'
 import { systemExecutable } from '../paths'
+import { runElevated } from '../system'
 
 /**
  * Windows has no API for one app to equalize another app's sound; that takes an audio driver
@@ -119,26 +120,6 @@ async function downloadEngine(): Promise<string> {
   throw new Error(`Couldn't download Equalizer APO (${lastError instanceof Error ? lastError.message : 'no connection'}).`)
 }
 
-/** Runs an installer elevated and resolves with its exit code once it closes. */
-function runElevated(file: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const powershell = systemExecutable('System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    // The path travels in an environment variable so no quoting can break the command.
-    const command = '$p = Start-Process -FilePath $env:MW_SETUP -Verb RunAs -Wait -PassThru; exit $p.ExitCode'
-    const child = spawn(existsSync(powershell) ? powershell : 'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
-      windowsHide: true,
-      env: { ...process.env, MW_SETUP: file }
-    })
-    let stderr = ''
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')))
-    child.on('error', reject)
-    child.on('exit', (code) => {
-      if (/cancel/i.test(stderr)) reject(new Error('Installation was cancelled.'))
-      else resolve(code ?? 1)
-    })
-  })
-}
-
 export class EqualizerApo {
   private location: Location | null = null
   private installing = false
@@ -154,6 +135,8 @@ export class EqualizerApo {
   }
   private writing: Promise<void> | null = null
   private queued: EqSettings | null = null
+  private lastEq: EqSettings | null = null
+  private bypass: string | null = null
 
   constructor(private readonly options: EqualizerApoOptions) {}
 
@@ -198,8 +181,19 @@ export class EqualizerApo {
     })
   }
 
+  /**
+   * Keeps the settings file flat while something else does the equalizing (the music-only mode),
+   * so Equalizer APO doesn't also change everything on the device. `reason` goes in the file.
+   */
+  async setBypass(reason: string | null): Promise<EqStatus> {
+    if (reason === this.bypass) return this.status
+    this.bypass = reason
+    return this.lastEq ? this.apply(this.lastEq) : this.status
+  }
+
   /** Writes the widget's settings file. Rapid calls are coalesced so the last settings always win. */
   async apply(eq: EqSettings): Promise<EqStatus> {
+    this.lastEq = eq
     if (!this.location) return this.status
     this.queued = eq
     if (!this.writing) {
@@ -220,7 +214,7 @@ export class EqualizerApo {
   private async write(eq: EqSettings): Promise<void> {
     if (!this.location) return
     try {
-      await fs.writeFile(path.join(this.location.configDir, INCLUDE_FILE), buildApoConfig(eq, presetName(eq)), 'utf8')
+      await fs.writeFile(path.join(this.location.configDir, INCLUDE_FILE), buildApoConfig(eq, presetName(eq), this.bypass), 'utf8')
       if (this.status.error) this.set({ error: null })
     } catch (error) {
       this.set({ error: describeError(error, this.location.configDir) })

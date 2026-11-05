@@ -17,6 +17,7 @@ export const DEFAULT_PALETTE: Palette = {
 }
 
 const cache = new Map<string, Palette>()
+const backdrops = new Map<string, string>()
 
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
   r /= 255
@@ -43,6 +44,33 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     image.onerror = () => reject(new Error('Artwork failed to load'))
     image.src = src
   })
+}
+
+/**
+ * The card's backdrop: the artwork zoomed, blurred and saturated, rendered once per cover into a
+ * small image. A live CSS blur this size would be redrawn by the GPU every frame something
+ * moves on top of it (the bars, the timeline); a small stretched image costs nothing to draw.
+ */
+export async function makeBackdrop(src: string, width: number, height: number): Promise<string> {
+  const cached = backdrops.get(src)
+  if (cached) return cached
+  const image = await loadImage(src)
+  const scale = 0.375
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(width * scale)
+  canvas.height = Math.round(height * scale)
+  const context = canvas.getContext('2d')
+  if (!context) return src
+  // Same look as object-cover + scale(1.5) + blur(30px) + saturate(1.35) on the full-size image.
+  context.filter = `blur(${(30 * 1.5 * scale).toFixed(1)}px) saturate(1.35)`
+  const fit = Math.max(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight) * 1.5
+  const w = image.naturalWidth * fit
+  const h = image.naturalHeight * fit
+  context.drawImage(image, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h)
+  const url = canvas.toDataURL('image/jpeg', 0.85)
+  if (backdrops.size >= 8) backdrops.clear()
+  backdrops.set(src, url)
+  return url
 }
 
 export async function extractPalette(src: string): Promise<Palette> {
@@ -90,7 +118,8 @@ export async function extractPalette(src: string): Promise<Palette> {
       base: `hsl(${hue} ${Math.min(30, saturation / 3).toFixed(0)}% 10%)`
     }
   }
-  if (cache.size > 40) cache.clear()
+  // Keys are whole data: URLs, so keep only a few.
+  if (cache.size >= 8) cache.clear()
   cache.set(src, palette)
   return palette
 }

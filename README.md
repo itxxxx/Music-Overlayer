@@ -12,15 +12,28 @@ Open **PowerShell** and run:
 irm https://raw.githubusercontent.com/itxxxx/Music-Overlayer/main/install.ps1 | iex
 ```
 
-This downloads the latest release and installs it for your account (no admin needed). It then offers to set up the equalizer and starts Music Overlayer. Run the same command again to update.
+This installs Music Overlayer for your account (no admin needed), offers to set up the equalizer and starts the app. Run the same command again to update.
 
 To uninstall, go to Windows Settings → Apps → Installed apps → Music Overlayer.
+
+Music Overlayer needs 64-bit Windows 10 or 11.
+
+## What's new in 1.1.0
+
+- **Music-only equalizer.** The equalizer can now change just the player the overlay shows. Discord, games and everything else sound exactly as before. It's the new default, and the old behaviour is still there as **Everything**. See [The equalizer](#the-equalizer).
+- **Volume slider.** Change the player's own volume right from the card.
+- **More reliable covers.** Artwork shows up more often, and an optional online lookup finds covers that some players don't share.
+- **Clearer shuffle and repeat.** The buttons light up when they're on, and repeat one shows a small 1.
+- **Lighter on your PC.** The overlay uses less CPU and memory.
+
+To update, run the install command again.
 
 ## What it does
 
 - **Pill:** shows the artwork, title, artist and live bars. After 4 seconds on its own it fades to 75% opacity.
-- **Card:** move the pointer over the pill and it comes back to full opacity. Rest there for 0.3 s and it opens into the card, with the cover art, a timeline you can drag to seek, previous/play-pause/next, and shuffle/repeat when the player supports them.
-- **Equalizer:** 10 bands, presets, your own saved presets and a preamp. Open it with the sliders button on the cover.
+- **Card:** move the pointer over the pill and it comes back to full opacity. Rest there for 0.3 s and it opens into the card, with the cover art, a timeline you can drag to seek, previous/play-pause/next, and shuffle/repeat when the player supports them. Shuffle and repeat light up when they're on; repeat one shows a small 1.
+- **Volume:** the slider under the controls changes the player's own volume, not your whole PC's. It's the same level as the player's slider in the Windows volume mixer. For a browser tab it changes the whole browser, because Windows has no volume per tab.
+- **Equalizer:** 10 bands, presets, your own saved presets and a preamp. By default it changes only the music player the overlay shows. Open it with the sliders button on the cover.
 - **Colours:** the overlay picks its colours from the current album art.
 - **Always on top:** it stays above other windows without taking focus. Clicks pass through everywhere except the overlay itself.
 
@@ -28,6 +41,7 @@ To uninstall, go to Windows Settings → Apps → Installed apps → Music Overl
 | --- | --- |
 | Open the card | Rest the pointer on the pill for 0.3 s, or click it |
 | Seek | Click or drag the timeline |
+| Change the player's volume | Drag the volume slider, or scroll over it. Click the speaker to mute. |
 | Switch player | Click the player name on the cover. It only works when more than one music app is playing. |
 | Move the overlay | Drag it. The position is remembered. |
 | Settings, hide, quit | Right-click the overlay, or use the tray icon |
@@ -44,92 +58,55 @@ The visualizer only moves while music is playing, so game sounds and voice chat 
 
 ## The equalizer
 
-Windows doesn't let one app change another app's sound on its own; that takes an audio driver component. Music Overlayer uses **Equalizer APO** (free, open source) for that. You never have to download or configure it yourself:
+The equalizer has two modes. Pick one at the top of the equalizer panel.
 
-1. Open the equalizer in the card and click **Set up**, or say yes during the install command.
-2. Windows asks for permission, then Equalizer APO's setup window opens. Tick the speakers or headphones you listen on.
+**Music only** (the default) changes only the player the overlay shows: Spotify, Deezer, a browser tab and so on. Discord, games and everything else sound exactly as before.
+
+Windows can't equalize one app by itself, so this mode sends the player's sound through **VB-CABLE**, a free virtual audio cable by VB-Audio. Music Overlayer equalizes it there and plays it on your speakers or headphones. To set it up:
+
+1. Open the equalizer in the card and click **Set up**, or say yes when the install command asks.
+2. Allow it when Windows asks for permission, then allow the driver.
 3. Restart Windows once.
 
-From then on, every change you make in the overlay is applied instantly. Some things to know:
-- The equalizer applies to everything played on the devices you ticked, not just music. Use the switch in the equalizer panel to turn it off.
-- To change which devices get the equalizer, use tray → **Equalizer engine** → **Choose speakers and headphones…**
-- Behind the scenes, Music Overlayer writes its bands to `music-overlayer-eq.txt` in Equalizer APO's `config` folder. It also adds these lines to `config.txt`:
+Some things to know:
+- For a browser tab, the whole browser goes through the equalizer, because Windows treats the browser as one app.
+- The music gets a small delay, about the time it takes to blink. You won't notice it in music; a video may look very slightly out of sync.
+- When Music Overlayer is closed, or the music stays paused for 20 seconds, the player goes back to playing straight to your speakers, without the equalizer.
+- While the equalizer works, Windows shows Music Overlayer as using a microphone. That's VB-CABLE's recording side, which carries your music. Nothing is recorded or saved.
 
-  ```
-  # >>> Music Overlayer equalizer (added by Music Overlayer - delete these lines to unlink it)
-  Device: all
-  Channel: all
-  Include: music-overlayer-eq.txt
-  # <<< Music Overlayer equalizer
-  ```
+**Everything** changes all the sound on your speakers or headphones, including voices in Discord calls and games. It uses **Equalizer APO** (free, open source), which the panel offers to set up the same way. Then:
+- To change which devices get it, use tray → **Equalizer engine** → **Choose speakers and headphones…**
+- If you already use Equalizer APO, your own settings stay as they are; Music Overlayer only adds its own. To remove them, use tray → **Equalizer engine** → **Unlink Music Overlayer**.
 
-  Tray → **Equalizer engine** → **Unlink Music Overlayer** removes these lines.
-
-## Develop
-
-You need [Node.js](https://nodejs.org) 22.12 or newer.
-
-```bash
-npm install      # also downloads Electron itself (about 100 MB, once)
-npm run dev      # run with hot reload
-npm run demo     # run with demo tracks, no music needed
-npm run dist     # build the installer and portable app into dist/
-```
-
-If `npm run dev` ever says **Electron uninstall**, run `npx install-electron` and try again.
-
-| Command | What it does |
-| --- | --- |
-| `npm run dev` | Run with hot reload |
-| `npm run demo` | Run with demo tracks |
-| `npm run build` | Build into `out/` |
-| `npm start` | Run the built app |
-| `npm run typecheck` | Type-check main, preload and UI |
-| `npm run dist` | Installer and portable `.exe` in `dist/` |
-
-## How it works
-
-| Part | Where | What it does |
-| --- | --- | --- |
-| Media bridge | `resources/media-bridge.ps1` | A Windows PowerShell script the app runs in the background. It reads Windows' media sessions every 0.4 s, keeps only the allowed players and sends play/pause, next, previous and seek. |
-| Player rules | `src/shared/apps.ts` | Which apps count as music players or browsers. |
-| Supervisor | `src/main/media/windows-bridge.ts` | Starts the script, restarts it if it stops, and passes the player rules on to it. |
-| Window | `src/main/widget-window.ts` | Transparent, always on top, click-through outside the overlay, never takes focus. |
-| Visualizer | `src/renderer/src/lib/audio-levels.ts` | Reads the level of what your PC is playing (loopback; nothing is recorded or saved). |
-| Equalizer | `src/main/eq/equalizer-apo.ts`, `src/shared/eq.ts` | Sets up Equalizer APO and writes the filter file. The curve in the panel is the real response of those filters. |
-| Installer | `install.ps1`, `.github/workflows/release.yml` | The one-line install command and the release builds. |
-
-### Project structure and shadcn/ui
-
-The project uses the shadcn layout:
-- `components.json`
-- Tailwind CSS v4 (`src/renderer/src/index.css`)
-- TypeScript, with the `@/` alias pointing to `src/renderer/src`
-
-UI components live in `src/renderer/src/components/ui`. That's where the shadcn CLI installs components, and the path copy-pasted components import from (`@/components/ui/button`, `@/lib/utils`). Add more components with `npx shadcn@latest add <name>`.
-
-The 21st.dev **AudioPlayer** is in `components/ui/audio-player.tsx` (unchanged). The overlay uses an adapted version, `components/ui/now-playing-card.tsx`, which drives the player Windows reports instead of its own `<audio>` element.
+Use the switch at the top of the equalizer panel to turn the equalizer off.
 
 ## Troubleshooting
 
-**The card says "Can't read Windows media right now".**
-The message under it gives the reason. Usually a policy or antivirus is blocking PowerShell scripts. To test the bridge on its own, run from the install folder:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File resources\media-bridge.ps1
-```
-
-With music playing it prints a line of JSON per change. Type `next` and press Enter to skip a track.
+**The overlay says "Can't read Windows media right now".**
+The message under it gives the reason. It usually means a security policy or antivirus on this PC is blocking PowerShell scripts.
 
 **A player doesn't show up.**
 Tray → **Players** lists every app that reported media. Tick it there. In Firefox, also check that `media.hardwaremediakeys.enabled` is `true` in `about:config`.
 
-**The timeline is greyed out, or shuffle and repeat are.**
-That player doesn't report them to Windows. Spotify, for example, doesn't offer shuffle or repeat.
+**The timeline is greyed out, or shuffle and repeat are missing.**
+That player doesn't let other apps use them. Browsers and Apple Music don't offer shuffle or repeat to other apps, so the card leaves those buttons out.
+
+**There's no cover art.**
+Some players don't share their artwork with Windows. Tray → **Find missing covers online** looks it up by title and artist on Apple's iTunes Search. It's off until you turn it on.
+
+**Music only says "Windows blocks apps from using recording devices".**
+VB-CABLE's recording side counts as a microphone. In Windows Settings → Privacy → Microphone, turn on **Let desktop apps access your microphone**.
+
+**A player is silent.**
+If Music Overlayer was closed unexpectedly while the equalizer worked, the player may still be sending its sound to VB-CABLE. Start Music Overlayer again and it puts it back. You can also reset it in Windows Settings → System → Sound → Volume mixer → **Reset**.
+
+**There's no volume slider.**
+The slider only shows when the player appears in the Windows volume mixer. Play something in it and it shows up.
 
 **The equalizer does nothing.**
 - Restart Windows after setup.
-- Check tray → **Equalizer engine** → **Choose speakers and headphones…** and make sure the device you listen on is ticked.
+- In **Music only**, the panel says which player it's equalizing. If the music plays without it, pause and play once.
+- In **Everything**, check tray → **Equalizer engine** → **Choose speakers and headphones…** and make sure the device you listen on is ticked.
 
 ---
 

@@ -6,8 +6,8 @@
     irm https://raw.githubusercontent.com/itxxxx/Music-Overlayer/main/install.ps1 | iex
 
   It downloads the latest Music Overlayer release from GitHub, installs it for the current user,
-  offers to set up the equalizer engine (Equalizer APO, free), and starts the app.
-  Running it again updates Music Overlayer to the latest release.
+  offers to set up the music-only equalizer (VB-CABLE, a free virtual audio cable), and starts
+  the app. Running it again updates Music Overlayer to the latest release.
 #>
 
 & {
@@ -34,9 +34,13 @@
     return $null
   }
 
-  function Test-EqualizerEngine {
-    if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\EqualizerAPO') { return $true }
-    return Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'EqualizerAPO\config\config.txt')
+  # VB-CABLE adds an output device named "CABLE Input".
+  function Test-VirtualCable {
+    $render = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\*\Properties'
+    foreach ($properties in (Get-ItemProperty -Path $render -ErrorAction SilentlyContinue)) {
+      if ([string]$properties.'{a45c254e-df1c-4efd-8020-67d146a850e0},2' -like 'CABLE Input*') { return $true }
+    }
+    return $null -ne (Get-ChildItem -Path (Join-Path $env:SystemRoot 'System32\drivers\vbaudio_cable*.sys') -ErrorAction SilentlyContinue | Select-Object -First 1)
   }
 
   if (-not [Environment]::Is64BitOperatingSystem) { throw "$AppName needs 64-bit Windows 10 or 11." }
@@ -62,43 +66,33 @@
   Remove-Item -LiteralPath $setup -ErrorAction SilentlyContinue
   if ($process.ExitCode -ne 0) { throw "The installer stopped with exit code $($process.ExitCode)." }
 
-  # 3. Equalizer engine
+  # 3. The music-only equalizer needs VB-CABLE
   $restartNeeded = $false
-  if (Test-EqualizerEngine) {
-    Write-Step 'The equalizer engine is already installed'
+  if (Test-VirtualCable) {
+    Write-Step 'VB-CABLE is already installed'
   } else {
     $answer = 'n'
     try {
-      $answer = Read-Host 'Set up the equalizer too? It installs Equalizer APO (free, needs admin permission and a restart) [Y/n]'
+      $answer = Read-Host 'Set up the music-only equalizer too? It installs VB-CABLE, a free virtual audio cable (needs admin permission and a restart) [Y/n]'
     } catch { }
     if ($answer -notmatch '^\s*(n|no)\s*$') {
-      Write-Step 'Downloading Equalizer APO'
-      $apoSetup = Join-Path $env:TEMP 'EqualizerAPO-setup.exe'
-      $sources = @(
-        'https://downloads.sourceforge.net/project/equalizerapo/1.4.2/EqualizerAPO-x64-1.4.2.exe',
-        'https://sourceforge.net/projects/equalizerapo/files/latest/download'
-      )
-      $downloaded = $false
-      foreach ($source in $sources) {
-        try {
-          # SourceForge sends download tools straight to the file; browsers get a web page.
-          Invoke-WebRequest -Uri $source -OutFile $apoSetup -UserAgent 'Wget/1.21.4' -UseBasicParsing
-          $head = [System.IO.File]::ReadAllBytes($apoSetup)[0..1]
-          if ($head[0] -eq 0x4D -and $head[1] -eq 0x5A) { $downloaded = $true; break }
-        } catch { }
+      $folder = Join-Path $env:TEMP 'music-overlayer-vbcable'
+      Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+      $null = New-Item -ItemType Directory -Path $folder
+      try {
+        Write-Step 'Downloading VB-CABLE from vb-audio.com'
+        $zip = Join-Path $folder 'VBCABLE_Driver_Pack.zip'
+        Invoke-WebRequest -Uri 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip' -OutFile $zip -UseBasicParsing
+        Expand-Archive -LiteralPath $zip -DestinationPath $folder -Force
+        $cableSetup = Join-Path $folder 'VBCABLE_Setup_x64.exe'
+        if (-not (Test-Path -LiteralPath $cableSetup)) { throw "the download didn't contain VB-CABLE's setup" }
+        Write-Step 'Running VB-CABLE setup: allow it when Windows asks'
+        Start-Process -FilePath $cableSetup -ArgumentList '-i', '-h' -Verb RunAs -Wait
+        $restartNeeded = $true
+      } catch {
+        Write-Warning "Couldn't set up VB-CABLE ($($_.Exception.Message)). You can set it up later from the equalizer panel in $AppName."
       }
-      if (-not $downloaded) {
-        Write-Warning "Couldn't download Equalizer APO. You can set it up later from the equalizer panel in $AppName."
-      } else {
-        Write-Step 'Running Equalizer APO setup: tick your speakers or headphones when it asks'
-        try {
-          Start-Process -FilePath $apoSetup -Verb RunAs -Wait
-          $restartNeeded = $true
-        } catch {
-          Write-Warning "Equalizer APO setup was cancelled. You can set it up later from the equalizer panel in $AppName."
-        }
-        Remove-Item -LiteralPath $apoSetup -ErrorAction SilentlyContinue
-      }
+      Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
 

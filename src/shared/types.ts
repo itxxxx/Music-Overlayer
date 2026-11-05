@@ -32,12 +32,20 @@ export interface MediaSession {
   trackKey: string
   /** How many players currently have a media session. */
   sessionCount: number
+  /**
+   * The player's level in the Windows volume mixer (0–1), or null when it can't be found.
+   * For a browser tab this is the whole browser: Windows has no volume per tab.
+   */
+  volume: number | null
+  muted: boolean | null
 }
 
 export interface MediaCover {
   trackKey: string
   /** data: URL of the artwork, or null when the player has none. */
   dataUrl: string | null
+  /** Where the artwork came from: the player itself, or an online lookup by title and artist. */
+  source?: 'player' | 'online'
 }
 
 export type BridgeState = 'starting' | 'ready' | 'error' | 'unsupported' | 'demo'
@@ -52,6 +60,15 @@ export type MediaCommand =
   | { type: 'seek'; positionMs: number }
   | { type: 'shuffle'; value: boolean }
   | { type: 'repeat'; value: RepeatMode }
+  /** The player's volume-mixer level, 0–1. */
+  | { type: 'volume'; value: number }
+  | { type: 'mute'; value: boolean }
+
+/** A command the player turned down, e.g. shuffle in a player that ignores it. */
+export interface MediaRefusal {
+  command: MediaCommand['type']
+  at: number
+}
 
 /** Which way the card opens from the pill. Chosen so the card always fits on screen. */
 export type ExpandDirection = 'down' | 'up'
@@ -80,6 +97,8 @@ export interface WidgetSettings {
   visualizer: boolean
   /** Show generated tracks instead of real media sessions. */
   demo: boolean
+  /** Look up artwork by title and artist when a player shares none. */
+  onlineCovers: boolean
 }
 
 export interface EqUserPreset {
@@ -88,8 +107,16 @@ export interface EqUserPreset {
   gains: number[]
 }
 
+/**
+ * What the equalizer changes. "music": only the player the overlay shows (its sound goes
+ * through VB-CABLE and the overlay equalizes it). "device": everything on the output device,
+ * through Equalizer APO.
+ */
+export type EqTarget = 'music' | 'device'
+
 export interface EqSettings {
   enabled: boolean
+  target: EqTarget
   /** One gain (dB) per band in EQ_BANDS. */
   gains: number[]
   /** Manual preamp (dB). Automatic headroom is added on top so boosts never clip. */
@@ -115,6 +142,23 @@ export interface EqStatus {
   error: string | null
 }
 
+/** The music-only equalizer: VB-CABLE, routing and the overlay's own audio path. */
+export interface MusicEqStatus {
+  /** Windows only. */
+  supported: boolean
+  /** VB-CABLE's playback side ("CABLE Input") is there. */
+  cable: boolean
+  /** Windows lets the overlay choose another app's output device. */
+  routing: boolean
+  /** The overlay is downloading or running VB-CABLE's setup. */
+  installing: boolean
+  /** VB-CABLE was installed but doesn't show up yet: Windows must restart. */
+  restartPending: boolean
+  /** The player being equalized right now (its name), or null. */
+  active: string | null
+  error: string | null
+}
+
 export type WidgetCommand = 'open-eq' | 'expand'
 
 export interface InitialState {
@@ -122,6 +166,9 @@ export interface InitialState {
   settings: WidgetSettings
   eq: EqSettings
   eqStatus: EqStatus
+  musicEq: MusicEqStatus
+  /** Only for tests: the recording device that stands in for VB-CABLE's "CABLE Output". */
+  testCableInput?: string
   direction: ExpandDirection
   media: {
     session: MediaSession | null
@@ -133,11 +180,11 @@ export interface InitialState {
 /** Window geometry. The pill sits in the vertical middle so the card can open up or down. */
 export const GEOMETRY = {
   windowWidth: 360,
-  windowHeight: 800,
+  windowHeight: 900,
   pillWidth: 288,
   pillHeight: 56,
   cardWidth: 320,
-  cardMaxHeight: 408
+  cardMaxHeight: 470
 } as const
 
 export const APP_NAME = 'Music Overlayer'
@@ -151,5 +198,6 @@ export const DEFAULT_WIDGET_SETTINGS: WidgetSettings = {
   idleDelayMs: 4000,
   hoverDelayMs: 300,
   visualizer: true,
-  demo: false
+  demo: false,
+  onlineCovers: false
 }

@@ -16,6 +16,7 @@ const api: WidgetApi = {
   onMediaSession: (listener) => subscribe('media:session', listener),
   onMediaCover: (listener) => subscribe('media:cover', listener),
   onBridgeStatus: (listener) => subscribe('media:status', listener),
+  onMediaRefused: (listener) => subscribe('media:refused', listener),
   sendMediaCommand: (command) => ipcRenderer.send('media:command', command),
 
   setInteractive: (interactive) => ipcRenderer.send('widget:interactive', interactive),
@@ -28,6 +29,7 @@ const api: WidgetApi = {
   onPointer: (listener) => subscribe('widget:pointer', listener),
   onCommand: (listener) => subscribe('widget:command', listener),
   onSettings: (listener) => subscribe('settings:changed', listener),
+  onVisibility: (listener) => subscribe('widget:visibility', listener),
   requestAudioCapture: () => ipcRenderer.send('audio:start'),
 
   eq: {
@@ -37,6 +39,15 @@ const api: WidgetApi = {
     refreshStatus: () => ipcRenderer.invoke('eq:status'),
     openDownloadPage: () => ipcRenderer.send('eq:download'),
     onStatus: (listener) => subscribe('eq:status', listener)
+  },
+
+  musicEq: {
+    install: () => ipcRenderer.invoke('music-eq:install'),
+    recheck: () => ipcRenderer.send('music-eq:recheck'),
+    openDownloadPage: () => ipcRenderer.send('music-eq:download'),
+    onStatus: (listener) => subscribe('music-eq:status', listener),
+    onPipeline: (listener) => subscribe('music-eq:pipeline', listener),
+    reportPipeline: (state) => ipcRenderer.send('music-eq:pipeline-state', state)
   }
 }
 

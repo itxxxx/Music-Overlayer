@@ -1,11 +1,12 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { APP_CREDIT, APP_NAME, GEOMETRY, PILL_TOP, type RepeatMode } from '../../../../shared/types'
+import { classifyPlayer } from '../../../../shared/apps'
+import { APP_CREDIT, APP_NAME, GEOMETRY, PILL_TOP, type MediaRefusal } from '../../../../shared/types'
 import { NowPlayingCard } from '@/components/ui/now-playing-card'
 import { NowPlayingPill } from '@/components/ui/now-playing-pill'
 import { EqualizerView } from '@/components/widget/equalizer-view'
-import { useCoverPalette, useDisplayedCover } from '@/hooks/use-cover'
-import { usePlayback, useTicker } from '@/hooks/use-playback'
+import { useBackdrop, useCoverPalette, useDisplayedCover } from '@/hooks/use-cover'
+import { usePlayback } from '@/hooks/use-playback'
 import { audioLevels } from '@/lib/audio-levels'
 import { useWidget } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -19,6 +20,18 @@ const COLLAPSE_DELAY_EQ_MS = 2500
 const WAKE_ON_TRACK_CHANGE_MS = 3000
 const DRAG_THRESHOLD_PX = 4
 const SPRING = { type: 'spring', stiffness: 380, damping: 34, mass: 0.9 } as const
+/** How long "Spotify didn't change shuffle" stays up. */
+const REFUSAL_NOTICE_MS = 3500
+/** Bars per second while the pill sits faded; full rate whenever it's looked at. */
+const IDLE_FPS = 30
+const ACTIVE_FPS = 60
+
+function refusalText(refusal: MediaRefusal, appName: string): string {
+  const player = appName || 'The player'
+  if (refusal.command === 'shuffle') return `${player} didn't change shuffle`
+  if (refusal.command === 'repeat') return `${player} didn't change repeat`
+  return `Couldn't change ${player}'s volume`
+}
 
 /**
  * The widget: a pill that fades when left alone and opens into the card when the pointer rests
@@ -35,6 +48,17 @@ export function Widget() {
   const { session } = playback
   const coverSrc = useDisplayedCover(session?.trackKey ?? null, coverState)
   const palette = useCoverPalette(coverSrc)
+  const backdrop = useBackdrop(coverSrc, GEOMETRY.cardWidth, GEOMETRY.cardMaxHeight)
+  const refusal = useWidget((state) => state.refusal)
+  const [notice, setNotice] = useState<string | null>(null)
+  const appNameRef = useRef('')
+  appNameRef.current = session?.appName ?? ''
+  useEffect(() => {
+    if (!refusal || Date.now() - refusal.at > REFUSAL_NOTICE_MS) return
+    setNotice(refusalText(refusal, appNameRef.current))
+    const timer = window.setTimeout(() => setNotice(null), REFUSAL_NOTICE_MS)
+    return () => window.clearTimeout(timer)
+  }, [refusal])
 
   const [expanded, setExpanded] = useState(false)
   const [view, setView] = useState<View>('player')
@@ -179,6 +203,7 @@ export function Widget() {
 
   // Visualizer
   useEffect(() => audioLevels.setPlaying(playback.playing), [playback.playing])
+  useEffect(() => audioLevels.setMaxFps(idle && !expanded ? IDLE_FPS : ACTIVE_FPS), [idle, expanded])
   useEffect(() => {
     if (!settings.visualizer) audioLevels.stopLive()
   }, [settings.visualizer])
@@ -276,10 +301,9 @@ export function Widget() {
         ? 'Looking for players…'
         : 'Start music in any app'
     : session.artist || session.appName
-  const ticking = expanded && view === 'player' && playback.playing
-  const now = useTicker(ticking, 250)
-  const repeatCycle: Record<RepeatMode, RepeatMode> = { none: 'list', list: 'track', track: 'none' }
   const visualizerOn = settings.visualizer
+  const isBrowser = session ? classifyPlayer(session.appId).kind === 'browser' : false
+  const volumeLabel = session?.appName ? `${session.appName} volume${isBrowser ? ' (the whole browser)' : ''}` : 'Volume'
 
   const anchorStyle =
     direction === 'down'
@@ -326,13 +350,13 @@ export function Widget() {
             aria-hidden
           >
             <AnimatePresence initial={false}>
-              {coverSrc && (
+              {backdrop && (
                 <motion.img
-                  key={coverSrc}
-                  src={coverSrc}
+                  key={backdrop}
+                  src={backdrop}
                   alt=""
                   draggable={false}
-                  className="absolute inset-0 h-full w-full scale-[1.5] object-cover blur-[30px] saturate-[1.35]"
+                  className="absolute inset-0 h-full w-full object-cover"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 0.62 }}
                   exit={{ opacity: 0 }}
@@ -355,7 +379,12 @@ export function Widget() {
             className={cn('absolute inset-x-0', expanded && 'pointer-events-none')}
             style={edgeStyle}
             initial={false}
-            animate={{ opacity: expanded ? 0 : 1, filter: expanded ? 'blur(4px)' : 'blur(0px)' }}
+            // The blur is only for the crossfade; left on, it would make the GPU redraw the pill every frame.
+            animate={{
+              opacity: expanded ? 0 : 1,
+              filter: expanded ? 'blur(4px)' : 'blur(0px)',
+              transitionEnd: expanded ? undefined : { filter: 'none' }
+            }}
             transition={{ duration: expanded ? 0.12 : 0.22, delay: expanded ? 0 : 0.12 }}
             aria-hidden={expanded}
           >
@@ -365,7 +394,7 @@ export function Widget() {
               cover={coverSrc}
               palette={palette}
               muted={empty}
-              visualizerActive={!expanded && visualizerOn}
+              visualizerActive={!expanded && visualizerOn && playback.playing}
             />
           </motion.div>
 
@@ -375,7 +404,11 @@ export function Widget() {
             className={cn('absolute left-1/2 -translate-x-1/2', !expanded && 'pointer-events-none')}
             style={{ ...edgeStyle, width: GEOMETRY.cardWidth }}
             initial={false}
-            animate={{ opacity: expanded ? 1 : 0, filter: expanded ? 'blur(0px)' : 'blur(6px)' }}
+            animate={{
+              opacity: expanded ? 1 : 0,
+              filter: expanded ? 'blur(0px)' : 'blur(6px)',
+              transitionEnd: expanded ? { filter: 'none' } : undefined
+            }}
             transition={{ duration: expanded ? 0.26 : 0.12, delay: expanded ? 0.08 : 0 }}
             aria-hidden={!expanded}
           >
@@ -402,7 +435,8 @@ export function Widget() {
                     cover={coverSrc}
                     palette={palette}
                     playing={playback.playing}
-                    positionMs={playback.getPosition(now)}
+                    open={expanded && view === 'player'}
+                    getPosition={playback.getPosition}
                     durationMs={session?.durationMs ?? 0}
                     canPlayPause={session?.canPlayPause ?? false}
                     canNext={session?.canNext ?? false}
@@ -410,18 +444,23 @@ export function Widget() {
                     canSeek={session?.canSeek ?? false}
                     canShuffle={session?.canShuffle ?? false}
                     canRepeat={session?.canRepeat ?? false}
-                    shuffle={session?.shuffle ?? null}
-                    repeat={session?.repeat ?? null}
-                    visualizerActive={expanded && visualizerOn}
+                    shuffle={playback.shuffle}
+                    repeat={playback.repeat}
+                    volume={empty ? null : playback.volume}
+                    muted={playback.muted}
+                    volumeLabel={volumeLabel}
+                    visualizerActive={expanded && visualizerOn && playback.playing}
                     showVisualizer={!empty}
-                    notice={bridgeProblem ? (bridge.message ?? null) : null}
+                    notice={bridgeProblem ? (bridge.message ?? null) : notice}
                     credit={`${APP_NAME}, ${APP_CREDIT}`}
                     onToggle={playback.toggle}
                     onNext={playback.next}
                     onPrev={playback.prev}
                     onSeek={playback.seek}
-                    onShuffle={() => playback.setShuffle(!(session?.shuffle ?? false))}
-                    onRepeat={() => playback.setRepeat(repeatCycle[session?.repeat ?? 'none'])}
+                    onShuffle={playback.toggleShuffle}
+                    onRepeat={playback.cycleRepeat}
+                    onVolume={playback.setVolume}
+                    onToggleMute={playback.toggleMute}
                     onCycleSession={playback.cycleSession}
                     onOpenEqualizer={() => showView('eq')}
                   />

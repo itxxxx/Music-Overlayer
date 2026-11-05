@@ -6,7 +6,9 @@ import type {
   ExpandDirection,
   InitialState,
   MediaCover,
+  MediaRefusal,
   MediaSession,
+  MusicEqStatus,
   WidgetSettings
 } from '../../../shared/types'
 
@@ -21,6 +23,11 @@ export interface WidgetState {
   direction: ExpandDirection
   eq: EqSettings
   eqStatus: EqStatus
+  musicEq: MusicEqStatus
+  /** The latest command a player turned down. */
+  refusal: MediaRefusal | null
+  /** False while the widget is hidden from the tray. */
+  visible: boolean
 }
 
 type Listener = () => void
@@ -38,7 +45,10 @@ export function initStore(initial: InitialState): void {
     settings: initial.settings,
     direction: initial.direction,
     eq: initial.eq,
-    eqStatus: initial.eqStatus
+    eqStatus: initial.eqStatus,
+    musicEq: initial.musicEq,
+    refusal: null,
+    visible: true
   }
 }
 
@@ -54,7 +64,7 @@ export function setState(patch: Partial<WidgetState> | ((current: WidgetState) =
   listeners.forEach((listener) => listener())
 }
 
-function subscribe(listener: Listener): () => void {
+export function subscribeState(listener: Listener): () => void {
   listeners.add(listener)
   return () => {
     listeners.delete(listener)
@@ -63,7 +73,7 @@ function subscribe(listener: Listener): () => void {
 
 /** Select a slice of widget state. Selectors should return existing references or primitives. */
 export function useWidget<T>(selector: (state: WidgetState) => T): T {
-  return useSyncExternalStore(subscribe, () => selector(getState()))
+  return useSyncExternalStore(subscribeState, () => selector(getState()))
 }
 
 /** Wire the store to the main process. Returns a cleanup function. */
@@ -73,9 +83,12 @@ export function connectStore(): () => void {
     api.onMediaSession((session) => setState({ session, sessionReceivedAt: Date.now() })),
     api.onMediaCover((cover) => setState({ cover })),
     api.onBridgeStatus((bridge) => setState({ bridge })),
+    api.onMediaRefused((refusal) => setState({ refusal })),
+    api.onVisibility((visible) => setState({ visible })),
     api.onDirection((direction) => setState({ direction })),
     api.onSettings((settings) => setState({ settings })),
-    api.eq.onStatus((eqStatus) => setState({ eqStatus }))
+    api.eq.onStatus((eqStatus) => setState({ eqStatus })),
+    api.musicEq.onStatus((musicEq) => setState({ musicEq }))
   ]
   return () => offs.forEach((off) => off())
 }

@@ -4,7 +4,8 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { audioLevels } from './lib/audio-levels'
-import { connectStore, initStore } from './lib/store'
+import { MusicEqPipeline } from './lib/music-eq'
+import { connectStore, getState, initStore, subscribeState } from './lib/store'
 
 // The main process calls this with a user gesture once the page has loaded (Windows only).
 window.__musicWidgetStartAudio = () => {
@@ -18,10 +19,60 @@ audioLevels.setLiveEndedHandler(() => {
   lastRestart = Date.now()
   window.setTimeout(() => window.musicWidget.requestAudioCapture(), 1500)
 })
+// The capture is let go during long pauses; music playing again brings it back.
+audioLevels.setWantLiveHandler(() => window.musicWidget.requestAudioCapture())
+// Hidden from the tray: stop listening. Showing it again starts the capture from the main process.
+window.musicWidget.onVisibility((visible) => {
+  if (!visible) audioLevels.stopLive()
+})
+
+/**
+ * The music-only equalizer's audio path runs whenever the main process asks (it routes the
+ * player only once this reports "running", and stops it only after the player is routed back).
+ */
+function connectMusicEq(inputName: string | undefined): void {
+  const api = window.musicWidget.musicEq
+  const pipeline = new MusicEqPipeline(inputName)
+  let wanted = false
+  pipeline.onFailure = (message) => {
+    audioLevels.attach(null)
+    api.reportPipeline({ running: false, error: message })
+  }
+  api.onPipeline((run) => {
+    wanted = run
+    if (!run) {
+      pipeline.stop()
+      audioLevels.attach(null)
+      api.reportPipeline({ running: false })
+      return
+    }
+    pipeline
+      .start(getState().eq)
+      .then(() => {
+        if (!wanted || !pipeline.running) return
+        audioLevels.attach(pipeline.analyser)
+        api.reportPipeline({ running: true })
+      })
+      .catch((error: unknown) => {
+        pipeline.stop()
+        audioLevels.attach(null)
+        api.reportPipeline({ running: false, error: error instanceof Error ? error.message : String(error) })
+      })
+  })
+  // Band and preamp changes apply straight away, without going through the main process.
+  let lastEq = getState().eq
+  subscribeState(() => {
+    const eq = getState().eq
+    if (eq === lastEq) return
+    lastEq = eq
+    pipeline.apply(eq)
+  })
+}
 
 void window.musicWidget.getInitialState().then((initial) => {
   initStore(initial)
   connectStore()
+  connectMusicEq(initial.testCableInput)
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <App />

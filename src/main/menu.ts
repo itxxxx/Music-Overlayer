@@ -87,6 +87,14 @@ export function buildMenu(ctx: MenuContext): Menu {
       click: (item) => ctx.updateSettings({ visualizer: item.checked })
     },
     {
+      label: 'Find missing covers online',
+      toolTip: "When a player shares no artwork, look it up by title and artist on Apple's iTunes Search.",
+      type: 'checkbox',
+      checked: settings.onlineCovers,
+      enabled: ctx.isWindows && !settings.demo,
+      click: (item) => ctx.updateSettings({ onlineCovers: item.checked })
+    },
+    {
       label: 'Demo tracks',
       type: 'checkbox',
       checked: settings.demo || !ctx.isWindows,

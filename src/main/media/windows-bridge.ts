@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline'
 import { appDisplayName, playerPatterns, type PlayerFilter } from '../../shared/apps'
 import type { MediaCommand, MediaSession, PlaybackStatus, RepeatMode } from '../../shared/types'
 import { resourcePath, systemExecutable } from '../paths'
-import { MediaSource } from './media-source'
+import { MediaSource, type CableInfo, type RouteResult } from './media-source'
 
 /** Session as printed by resources/media-bridge.ps1. */
 export interface RawSession {
@@ -22,14 +22,21 @@ export interface RawSession {
   ctl: number
   shuffle: boolean | null
   repeat: number | null
+  /** Volume-mixer level 0–1 and mute, or null when the player's audio session wasn't found. */
+  vol?: number | null
+  mute?: boolean | null
   key: string
 }
 
 type BridgeMessage =
   | { t: 'hello'; ps: string; os: string }
+  | { t: 'native'; ok: boolean; message?: string; from?: string; ms?: number }
   | { t: 'ready' }
   | { t: 'state'; n: number; s: RawSession | null }
-  | { t: 'cover'; key: string; mime: string | null; b64: string | null }
+  | { t: 'cover'; key: string; mime: string | null; b64: string | null; why?: string }
+  | { t: 'cable'; id: string | null; routing: boolean; why?: string }
+  | ({ t: 'routed' } & RouteResult)
+  | ({ t: 'unrouted' } & RouteResult)
   | { t: 'ack'; cmd: string; ok: boolean }
   | { t: 'error'; message: string }
   | { t: 'fatal'; message: string }
@@ -71,9 +78,14 @@ export function toMediaSession(raw: RawSession, count: number, receivedAt: numbe
     shuffle: typeof raw.shuffle === 'boolean' ? raw.shuffle : null,
     repeat: raw.repeat === null || raw.repeat === undefined ? null : (REPEAT[raw.repeat] ?? null),
     trackKey: raw.key,
-    sessionCount: count
+    sessionCount: count,
+    volume: typeof raw.vol === 'number' && Number.isFinite(raw.vol) ? Math.min(1, Math.max(0, raw.vol)) : null,
+    muted: typeof raw.mute === 'boolean' ? raw.mute : null
   }
 }
+
+/** Bridge command names that the UI cares about when a player turns them down. */
+const REFUSABLE = new Set<MediaCommand['type']>(['shuffle', 'repeat', 'volume', 'mute'])
 
 export function toCommandLine(command: MediaCommand, timelineStartMs: number): string {
   switch (command.type) {
@@ -91,6 +103,10 @@ export function toCommandLine(command: MediaCommand, timelineStartMs: number): s
       return `shuffle ${command.value ? 1 : 0}`
     case 'repeat':
       return `repeat ${Math.max(0, REPEAT.indexOf(command.value))}`
+    case 'volume':
+      return `volume ${Math.min(1, Math.max(0, command.value)).toFixed(3)}`
+    case 'mute':
+      return `mute ${command.value ? 1 : 0}`
   }
 }
 
@@ -106,6 +122,7 @@ export class WindowsMediaBridge extends MediaSource {
   private restartDelayMs = 1000
   private timelineStartMs = 0
   private filter: PlayerFilter
+  private lastCoverWhy = ''
 
   constructor(filter: PlayerFilter) {
     super()
@@ -120,6 +137,28 @@ export class WindowsMediaBridge extends MediaSource {
       this.child.stdin.write(`filter ${encodeFilter(filter)}\n`)
     } catch (error) {
       console.warn('[media-bridge] could not update the player filter', error)
+    }
+  }
+
+  checkCable(): void {
+    this.write('cable')
+  }
+
+  route(endpointId: string): void {
+    // Endpoint ids look like {0.0.0.00000000}.{guid}: no spaces.
+    if (/^[\w{}.\-#]+$/.test(endpointId)) this.write(`route ${endpointId}`)
+  }
+
+  unroute(appId: string): void {
+    this.write(appId === '*' ? 'unroute *' : `unroute ${Buffer.from(appId, 'utf8').toString('base64')}`)
+  }
+
+  private write(line: string): void {
+    if (!this.child) return
+    try {
+      this.child.stdin.write(`${line}\n`)
+    } catch (error) {
+      console.warn('[media-bridge] could not send', line.split(' ')[0], error)
     }
   }
 
@@ -148,12 +187,7 @@ export class WindowsMediaBridge extends MediaSource {
   }
 
   command(command: MediaCommand): void {
-    if (!this.child) return
-    try {
-      this.child.stdin.write(`${toCommandLine(command, this.timelineStartMs)}\n`)
-    } catch (error) {
-      console.warn('[media-bridge] could not send command', error)
-    }
+    this.write(toCommandLine(command, this.timelineStartMs))
   }
 
   private launch(): void {
@@ -173,7 +207,9 @@ export class WindowsMediaBridge extends MediaSource {
       '-File',
       script,
       '-PollMs',
-      '400',
+      '500',
+      '-IdlePollMs',
+      '1500',
       '-Filter',
       encodeFilter(this.filter)
     ]
@@ -234,6 +270,10 @@ export class WindowsMediaBridge extends MediaSource {
       case 'hello':
         console.info(`[media-bridge] Windows PowerShell ${message.ps} on Windows ${message.os}`)
         break
+      case 'native':
+        if (message.ok) console.info(`[media-bridge] native helper loaded (${message.from ?? '?'}, ${message.ms ?? '?'} ms)`)
+        else console.warn('[media-bridge] no per-app volume:', message.message)
+        break
       case 'ready':
         this.restartDelayMs = 1000
         this.emit('status', { state: 'ready' })
@@ -248,11 +288,32 @@ export class WindowsMediaBridge extends MediaSource {
         }
         break
       case 'cover':
+        if (!message.b64 && message.why && message.why !== this.lastCoverWhy) {
+          this.lastCoverWhy = message.why
+          console.info('[media-bridge] no artwork:', message.why)
+        }
         this.emit('cover', {
           trackKey: message.key,
-          dataUrl: message.b64 && message.mime ? `data:${message.mime};base64,${message.b64}` : null
+          dataUrl: message.b64 && message.mime ? `data:${message.mime};base64,${message.b64}` : null,
+          source: 'player'
         })
         break
+      case 'cable': {
+        const cable: CableInfo = { id: typeof message.id === 'string' && message.id ? message.id : null, routing: message.routing === true }
+        if (message.why) cable.why = message.why
+        if (!cable.routing && message.why) console.info('[media-bridge] no per-app routing:', message.why)
+        this.emit('cable', cable)
+        break
+      }
+      case 'routed':
+      case 'unrouted': {
+        const result: RouteResult = { app: String(message.app ?? ''), n: Number(message.n) || 0 }
+        if (message.why) result.why = String(message.why)
+        if (message.exited) result.exited = true
+        if (message.t === 'routed' && result.n === 0) console.info('[media-bridge] could not route', result.app, result.why ?? '')
+        this.emit(message.t, result)
+        break
+      }
       case 'error':
         console.warn('[media-bridge]', message.message)
         break
@@ -260,7 +321,10 @@ export class WindowsMediaBridge extends MediaSource {
         this.emit('status', { state: 'unsupported', message: message.message })
         break
       case 'ack':
-        if (!message.ok) console.info(`[media-bridge] the player ignored "${message.cmd}"`)
+        if (!message.ok) {
+          console.info(`[media-bridge] the player ignored "${message.cmd}"`)
+          if (REFUSABLE.has(message.cmd as MediaCommand['type'])) this.emit('refused', message.cmd as MediaCommand['type'])
+        }
         break
       case 'apps':
         if (Array.isArray(message.ids)) this.emit('apps', message.ids.filter((id) => typeof id === 'string'))

@@ -23,6 +23,11 @@ interface LiveCapture {
   stream: MediaStream
 }
 
+/** After this long without music the audio graph is paused... */
+const SUSPEND_AFTER_MS = 2000
+/** ...and after this long the system-audio capture is let go entirely. */
+const RELEASE_AFTER_MS = 15000
+
 class AudioLevels {
   private readonly listeners = new Set<Listener>()
   private readonly spectrum = new Uint8Array(new ArrayBuffer(FFT_SIZE / 2))
@@ -32,9 +37,59 @@ class AudioLevels {
   private playing = false
   private energy = 0
   private onLiveEnded: (() => void) | null = null
+  private onWantLive: (() => void) | null = null
+  /** The capture was let go during a long pause and should come back with the music. */
+  private released = false
+  private suspendTimer = 0
+  private releaseTimer = 0
+  private frameInterval = 1000 / 60
+  private lastFrameAt = 0
+  /** The music-only equalizer's own analyser: just the music, no capture needed. */
+  private external: AnalyserNode | null = null
 
   setPlaying(playing: boolean): void {
+    if (playing === this.playing) return
     this.playing = playing
+    window.clearTimeout(this.suspendTimer)
+    window.clearTimeout(this.releaseTimer)
+    if (playing) {
+      if (this.live) void this.live.context.resume().catch(() => undefined)
+      else if (this.released) {
+        this.released = false
+        this.onWantLive?.()
+      }
+      return
+    }
+    this.scheduleIdle()
+  }
+
+  /** Nothing to show while paused: stop processing audio, and later stop capturing it. */
+  private scheduleIdle(): void {
+    if (!this.live) return
+    window.clearTimeout(this.suspendTimer)
+    window.clearTimeout(this.releaseTimer)
+    this.suspendTimer = window.setTimeout(() => void this.live?.context.suspend().catch(() => undefined), SUSPEND_AFTER_MS)
+    this.releaseTimer = window.setTimeout(() => {
+      if (!this.live || this.playing) return
+      this.stopLive()
+      this.released = true
+    }, RELEASE_AFTER_MS)
+  }
+
+  /**
+   * Read the bars from the music-only equalizer's audio path instead of the system loopback
+   * (null goes back to the loopback). That path only carries the music app.
+   */
+  attach(analyser: AnalyserNode | null): void {
+    if (analyser === this.external) return
+    this.external = analyser
+    if (analyser) this.stopLive()
+    else this.onWantLive?.()
+  }
+
+  /** At most this many frames per second (the display may refresh faster). */
+  setMaxFps(fps: number): void {
+    this.frameInterval = 1000 / Math.max(1, fps)
   }
 
   /** Called when the loopback stream dies (e.g. the output device changed). */
@@ -42,12 +97,17 @@ class AudioLevels {
     this.onLiveEnded = handler
   }
 
+  /** Called when music starts again after the capture was let go during a pause. */
+  setWantLiveHandler(handler: () => void): void {
+    this.onWantLive = handler
+  }
+
   get isLive(): boolean {
     return this.live !== null
   }
 
   startLive(): Promise<boolean> {
-    if (this.live) return Promise.resolve(true)
+    if (this.live || this.external) return Promise.resolve(true)
     if (this.starting) return this.starting
     this.starting = this.openLoopback().finally(() => {
       this.starting = null
@@ -56,6 +116,9 @@ class AudioLevels {
   }
 
   stopLive(): void {
+    window.clearTimeout(this.suspendTimer)
+    window.clearTimeout(this.releaseTimer)
+    this.released = false
     const live = this.live
     this.live = null
     if (!live) return
@@ -111,6 +174,7 @@ class AudioLevels {
         this.onLiveEnded?.()
       })
       this.live = { context, analyser, stream }
+      if (!this.playing) this.scheduleIdle()
       return true
     } catch (error) {
       stream?.getTracks().forEach((track) => track.stop())
@@ -122,16 +186,29 @@ class AudioLevels {
   private frame = (now: number): void => {
     this.raf = 0
     if (this.listeners.size === 0) return
+    // Skip frames beyond the cap; 1 ms of slack keeps a 60 Hz display at a steady 60.
+    if (now - this.lastFrameAt < this.frameInterval - 1) {
+      this.raf = requestAnimationFrame(this.frame)
+      return
+    }
+    this.lastFrameAt = now
     let sampleRate = 48000
-    if (this.live) {
+    if (this.external) {
+      sampleRate = this.external.context.sampleRate
+      if (this.playing) this.external.getByteFrequencyData(this.spectrum)
+      else this.spectrum.fill(0)
+    } else if (this.live) {
       sampleRate = this.live.context.sampleRate
       // System audio includes Discord, games and notifications: only listen while music plays.
       if (this.playing) this.live.analyser.getByteFrequencyData(this.spectrum)
       else this.spectrum.fill(0)
+    } else if (this.starting || this.released) {
+      // The real audio is about to come back; don't show made-up bars in between.
+      this.spectrum.fill(0)
     } else {
       this.simulate(now)
     }
-    const frame: SpectrumFrame = { spectrum: this.spectrum, sampleRate, live: this.live !== null }
+    const frame: SpectrumFrame = { spectrum: this.spectrum, sampleRate, live: this.live !== null || this.external !== null }
     for (const listener of this.listeners) listener(frame, now)
     this.raf = requestAnimationFrame(this.frame)
   }

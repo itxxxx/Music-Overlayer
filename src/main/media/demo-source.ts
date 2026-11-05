@@ -47,12 +47,36 @@ export class DemoMediaSource extends MediaSource {
   private sampledAt = Date.now()
   private shuffle = false
   private repeat: RepeatMode = 'none'
+  private volume = 0.8
+  private muted = false
   private timer: NodeJS.Timeout | null = null
+
+  /** MUSIC_OVERLAYER_FAKE_CABLE=1 pretends VB-CABLE is installed (for trying the music-only path). */
+  private readonly fakeCable = process.env.MUSIC_OVERLAYER_FAKE_CABLE === '1'
+  private routed = false
 
   start(): void {
     this.emit('status', { state: 'demo' })
     this.publish(true)
     this.timer = setInterval(() => this.tick(), 500)
+    if (this.fakeCable) setTimeout(() => this.checkCable(), 50)
+  }
+
+  checkCable(): void {
+    if (this.fakeCable) this.emit('cable', { id: '{0.0.0.00000000}.{demo-cable}', routing: true })
+  }
+
+  route(): void {
+    if (!this.fakeCable) return
+    this.routed = true
+    setTimeout(() => this.emit('routed', { app: 'demo', n: 1 }), 60)
+  }
+
+  unroute(appId: string): void {
+    if (!this.fakeCable) return
+    const had = this.routed
+    this.routed = false
+    setTimeout(() => this.emit('unrouted', { app: appId, n: had ? 1 : 0 }), 60)
   }
 
   stop(): void {
@@ -90,6 +114,13 @@ export class DemoMediaSource extends MediaSource {
         break
       case 'repeat':
         this.repeat = command.value
+        break
+      case 'volume':
+        this.volume = Math.max(0, Math.min(1, command.value))
+        if (this.volume > 0) this.muted = false
+        break
+      case 'mute':
+        this.muted = command.value
         break
       case 'cycle-session':
         return
@@ -148,7 +179,9 @@ export class DemoMediaSource extends MediaSource {
       shuffle: this.shuffle,
       repeat: this.repeat,
       trackKey: `demo|${this.index}`,
-      sessionCount: 1
+      sessionCount: 1,
+      volume: this.volume,
+      muted: this.muted
     }
     this.emit('session', session)
     if (withCover) {

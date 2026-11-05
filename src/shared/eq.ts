@@ -34,6 +34,7 @@ export const EQ_PRESETS: EqPreset[] = [
 
 export const DEFAULT_EQ: EqSettings = {
   enabled: true,
+  target: 'music',
   gains: [...EQ_PRESETS[0].gains],
   preamp: 0,
   presetId: 'flat',
@@ -72,6 +73,7 @@ export function sanitizeEq(input: unknown): EqSettings {
     : []
   return {
     enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_EQ.enabled,
+    target: raw.target === 'device' || raw.target === 'music' ? raw.target : DEFAULT_EQ.target,
     gains: sanitizeGains(raw.gains),
     preamp: roundHalf(clamp(finite(raw.preamp, 0), PREAMP_MIN_DB, PREAMP_MAX_DB)),
     presetId: typeof raw.presetId === 'string' ? raw.presetId.slice(0, 40) : 'custom',
@@ -141,7 +143,8 @@ function formatHz(freq: number): string {
 }
 
 /** Text for the Equalizer APO include file. */
-export function buildApoConfig(eq: EqSettings, presetName: string): string {
+/** `bypass` explains why the file is flat even though the equalizer is on (e.g. music-only mode). */
+export function buildApoConfig(eq: EqSettings, presetName: string, bypass: string | null = null): string {
   const lines = [
     '# Music Overlayer equalizer',
     '# Written automatically by Music Overlayer. Changes made here will be overwritten.',
@@ -150,6 +153,10 @@ export function buildApoConfig(eq: EqSettings, presetName: string): string {
   ]
   if (!eq.enabled) {
     lines.push('# Equalizer is switched off in Music Overlayer.')
+    return lines.join('\r\n') + '\r\n'
+  }
+  if (bypass) {
+    lines.push(`# ${bypass.replace(/[\r\n]+/g, ' ').slice(0, 160)}`)
     return lines.join('\r\n') + '\r\n'
   }
   lines.push(`Preamp: ${effectivePreampDb(eq).toFixed(1)} dB`)

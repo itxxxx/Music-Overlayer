@@ -1,9 +1,39 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MediaCommand, MediaSession, PlaybackStatus, RepeatMode } from '../../../shared/types'
 import { useWidget } from '@/lib/store'
 
 const STATUS_HOLD_MS = 2000
 const SEEK_HOLD_MS = 2500
+/** How long a clicked shuffle/repeat/volume shows before the player has to confirm it. */
+const SETTING_HOLD_MS = 2500
+/** While dragging the volume, send at most this often. */
+const VOLUME_SEND_MS = 40
+
+interface Held<T> {
+  value: T
+  until: number
+}
+
+/**
+ * Shows `requested` until the player reports it, or until the hold runs out (the player
+ * ignored it, so its own value shows again).
+ */
+function useHeld<T>(reported: T, same: (a: T, b: T) => boolean = Object.is): [T, (value: T) => void] {
+  const [held, setHeld] = useState<Held<T> | null>(null)
+  useEffect(() => {
+    if (!held) return
+    if (same(reported, held.value)) {
+      setHeld(null)
+      return
+    }
+    const timer = window.setTimeout(() => setHeld(null), Math.max(0, held.until - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [reported, held, same])
+  const hold = useCallback((value: T) => setHeld({ value, until: Date.now() + SETTING_HOLD_MS }), [])
+  return [held ? held.value : reported, hold]
+}
+
+const sameVolume = (a: number | null, b: number | null): boolean => a !== null && b !== null && Math.abs(a - b) < 0.006
 
 /** Where the track is at `now`, extrapolated from the last position the player reported. */
 export function positionAt(session: MediaSession | null, now: number): number {
@@ -66,6 +96,13 @@ export function usePlayback() {
 
   const status: PlaybackStatus = heldStatus?.status ?? session?.status ?? 'stopped'
   const playing = status === 'playing'
+  const [shuffle, holdShuffle] = useHeld<boolean | null>(session?.shuffle ?? null)
+  const [repeat, holdRepeat] = useHeld<RepeatMode | null>(session?.repeat ?? null)
+  const [volume, holdVolume] = useHeld<number | null>(session?.volume ?? null, sameVolume)
+  const [muted, holdMuted] = useHeld<boolean | null>(session?.muted ?? null)
+  const lastVolumeSend = useRef(0)
+  const volumeTimer = useRef(0)
+  useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
   const getPosition = useCallback(
     (now: number): number => {
@@ -108,8 +145,43 @@ export function usePlayback() {
     seek,
     next: () => send({ type: 'next' }),
     prev: () => send({ type: 'prev' }),
-    setShuffle: (value: boolean) => send({ type: 'shuffle', value }),
-    setRepeat: (value: RepeatMode) => send({ type: 'repeat', value }),
+    shuffle,
+    repeat,
+    toggleShuffle: () => {
+      const value = !(shuffle ?? false)
+      holdShuffle(value)
+      send({ type: 'shuffle', value })
+    },
+    /** Off, repeat all, repeat one, off: the same order as most players. */
+    cycleRepeat: () => {
+      const value: RepeatMode = repeat === 'list' ? 'track' : repeat === 'track' ? 'none' : 'list'
+      holdRepeat(value)
+      send({ type: 'repeat', value })
+    },
+    volume,
+    muted,
+    /** While dragging pass `final: false`; the last value is always sent. */
+    setVolume: (value: number, final: boolean) => {
+      const level = Math.min(1, Math.max(0, value))
+      holdVolume(level)
+      if (muted && level > 0) {
+        holdMuted(false)
+        send({ type: 'mute', value: false })
+      }
+      window.clearTimeout(volumeTimer.current)
+      const wait = lastVolumeSend.current + VOLUME_SEND_MS - Date.now()
+      const fire = () => {
+        lastVolumeSend.current = Date.now()
+        send({ type: 'volume', value: level })
+      }
+      if (final || wait <= 0) fire()
+      else volumeTimer.current = window.setTimeout(fire, wait)
+    },
+    toggleMute: () => {
+      const value = !(muted ?? false)
+      holdMuted(value)
+      send({ type: 'mute', value })
+    },
     cycleSession: () => send({ type: 'cycle-session' })
   }
 }

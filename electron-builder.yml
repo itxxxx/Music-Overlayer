@@ -9,6 +9,8 @@ files:
 extraResources:
   - from: resources/media-bridge.ps1
     to: media-bridge.ps1
+  - from: resources/media-native.cs
+    to: media-native.cs
   - from: resources/tray.ico
     to: tray.ico
   - from: resources/tray.png

@@ -10,11 +10,23 @@
   Started and supervised by the Electron main process. Must run in Windows PowerShell 5.1
   (powershell.exe); PowerShell 7 can't load WinRT types this way.
 
+  media-native.cs (next to this script) reads the per-app volume, finds VB-CABLE and sends the
+  shown player's sound through it (for the music-only equalizer). It's compiled the first time
+  and kept in %LOCALAPPDATA%\Music Overlayer\native. Without it the bridge still works, minus
+  those.
+
   Output: one JSON object per line on stdout (UTF-8)
     {"t":"hello","ps":"5.1.22621.4111","os":"10.0.22631.0"}
+    {"t":"native","ok":true}                          or ok false with a message
     {"t":"ready"}
     {"t":"state","n":2,"s":{...}}                    s is null when no player has a session
-    {"t":"cover","key":"...","mime":"image/jpeg","b64":"..."}   mime and b64 are null without artwork
+                                                      s.vol is 0-1 and s.mute true/false, or both null
+                                                      when the player's volume can't be found
+    {"t":"cover","key":"...","mime":"image/jpeg","b64":"..."}   mime and b64 are null without
+                                                      artwork, and "why" says what happened
+    {"t":"cable","id":"{0.0.0.00000000}.{...}","routing":true}   VB-CABLE's "CABLE Input", or id null
+    {"t":"routed","app":"Spotify.exe","n":1}        the app's sound now goes to the cable (n processes)
+    {"t":"unrouted","app":"Spotify.exe","n":1}      back to the default device ("exited" when it quit)
     {"t":"ack","cmd":"next","ok":true}
     {"t":"error","message":"..."}
     {"t":"fatal","message":"..."}                   the script then exits with code 3
@@ -22,13 +34,23 @@
     {"t":"apps","ids":["Spotify.exe","Discord"]}    every app with a session, shown or not
 
   Input: one command per line on stdin
-    toggle | play | pause | next | prev | stop | seek <ms> | shuffle <0|1> | repeat <0|1|2> | cycle | refresh
+    toggle | play | pause | next | prev | stop | seek <ms> | shuffle <0|1> | repeat <0|1|2>
+    volume <0-1> | mute <0|1>                       the shown player's volume-mixer level
+    cable                                           look for VB-CABLE again
+    route <endpoint id>                             send the shown player's sound to that device
+    unroute <base64 app id> | unroute *             send it (or everything routed) back to the default
+    cycle | refresh
     filter <base64 of {"allow":"<regex>","block":"<regex>"}>   which apps to show (matched against app ids)
+
+  Run it by hand with -Diagnose to print what it can read, then exit.
 #>
 param(
-  [int]$PollMs = 400,
+  # How often to read the sessions while something plays, and while nothing does.
+  [int]$PollMs = 500,
+  [int]$IdlePollMs = 1500,
   # Same format as the "filter" command. Empty shows every app.
-  [string]$Filter = ''
+  [string]$Filter = '',
+  [switch]$Diagnose
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,7 +85,9 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
   exit 3
 }
 
-Send-Json ([ordered]@{ t = 'hello'; ps = $PSVersionTable.PSVersion.ToString(); os = [Environment]::OSVersion.Version.ToString() })
+if (-not $Diagnose) {
+  Send-Json ([ordered]@{ t = 'hello'; ps = $PSVersionTable.PSVersion.ToString(); os = [Environment]::OSVersion.Version.ToString() })
+}
 
 # --- WinRT plumbing ---------------------------------------------------------------------------
 
@@ -72,8 +96,10 @@ try {
   $null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media.Control, ContentType = WindowsRuntime]
   $null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties, Windows.Media.Control, ContentType = WindowsRuntime]
   $null = [Windows.Media.MediaPlaybackAutoRepeatMode, Windows.Media, ContentType = WindowsRuntime]
-  $null = [Windows.Storage.Streams.DataReader, Windows.Storage.Streams, ContentType = WindowsRuntime]
   $null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType, Windows.Storage.Streams, ContentType = WindowsRuntime]
+  $null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType = WindowsRuntime]
+  $null = [Windows.Storage.Streams.IInputStream, Windows.Storage.Streams, ContentType = WindowsRuntime]
+  $null = [Windows.Storage.Streams.IContentTypeProvider, Windows.Storage.Streams, ContentType = WindowsRuntime]
 } catch {
   Send-Json ([ordered]@{ t = 'fatal'; message = "Windows media controls aren't available on this PC: $($_.Exception.Message)" })
   exit 3
@@ -110,11 +136,75 @@ function Wait-WinRT($Operation, [Type]$ResultType, [int]$TimeoutMs = 2500) {
   return $task.Result
 }
 
+# --- Native helper ------------------------------------------------------------------------------
+
+$script:native = $false
+$script:nativeError = ''
+$script:nativeFrom = ''    # 'cache', 'compiled' or 'memory'
+$script:nativeMs = 0
+
+# Compiling takes a second or two, so the result is kept, named after the source's hash.
+function Initialize-Native {
+  if ($null -ne ('MusicOverlayer.AudioApps' -as [type])) {
+    $script:native = $true
+    return
+  }
+  $source = Join-Path -Path $PSScriptRoot -ChildPath 'media-native.cs'
+  if (-not (Test-Path -LiteralPath $source)) {
+    $script:nativeError = 'media-native.cs is missing next to the bridge script.'
+    return
+  }
+  $code = [System.IO.File]::ReadAllText($source)
+  $cached = $null
+  $clock = [System.Diagnostics.Stopwatch]::StartNew()
+  $script:nativeFrom = 'cache'
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hash = [BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($code))).Replace('-', '').Substring(0, 16)
+    $folder = Join-Path -Path ([Environment]::GetFolderPath('LocalApplicationData')) -ChildPath 'Music Overlayer\native'
+    $cached = Join-Path -Path $folder -ChildPath "media-native-$hash.dll"
+    if (-not (Test-Path -LiteralPath $cached)) {
+      $null = New-Item -ItemType Directory -Force -Path $folder
+      # Copies from older versions of the app aren't needed any more.
+      Get-ChildItem -LiteralPath $folder -Filter 'media-native-*.dll' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+      $script:nativeFrom = 'compiled'
+      Add-Type -TypeDefinition $code -Language CSharp -OutputAssembly $cached -OutputType Library -IgnoreWarnings
+    }
+    if ($null -eq ('MusicOverlayer.AudioApps' -as [type])) { Add-Type -LiteralPath $cached }
+  } catch {
+    $script:nativeError = $_.Exception.Message
+    # A damaged copy would fail the same way next time; remove it so it gets rebuilt.
+    if ($cached -and $null -eq ('MusicOverlayer.AudioApps' -as [type])) {
+      Remove-Item -LiteralPath $cached -Force -ErrorAction SilentlyContinue
+    }
+  }
+  if ($null -eq ('MusicOverlayer.AudioApps' -as [type])) {
+    # No usable copy on disk (blocked folder, half-written file...): compile in memory instead.
+    $script:nativeFrom = 'memory'
+    try {
+      Add-Type -TypeDefinition $code -Language CSharp -IgnoreWarnings
+    } catch {
+      $script:nativeError = "Couldn't compile media-native.cs: $($_.Exception.Message)"
+    }
+  }
+  $script:native = $null -ne ('MusicOverlayer.AudioApps' -as [type])
+  if ($script:native) { $script:nativeError = '' }
+  $script:nativeMs = [int]$clock.ElapsedMilliseconds
+}
+
+Initialize-Native
+if (-not $Diagnose) {
+  if ($script:native) { Send-Json ([ordered]@{ t = 'native'; ok = $true; from = $script:nativeFrom; ms = $script:nativeMs }) }
+  else { Send-Json ([ordered]@{ t = 'native'; ok = $false; message = $script:nativeError; ms = $script:nativeMs }) }
+}
+
 # --- Sessions -----------------------------------------------------------------------------------
 
 $script:manager = $null
 $script:selected = $null   # session currently shown in the widget
 $script:shownId = $null    # its app id
+$script:shownStatus = -1   # its playback status (4 = playing)
 $script:pinnedId = $null   # app id picked by hand with "cycle"
 $script:allowPattern = ''  # only apps matching this are shown ('' = all)
 $script:blockPattern = ''  # apps matching this are never shown
@@ -150,7 +240,7 @@ Set-Filter $Filter
 function Connect-Manager {
   $operation = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()
   $script:manager = Wait-WinRT $operation ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]) 8000
-  Send-Json ([ordered]@{ t = 'ready' })
+  if (-not $Diagnose) { Send-Json ([ordered]@{ t = 'ready' }) }
 }
 
 function Get-AppId($Session) {
@@ -174,8 +264,7 @@ function Publish-Apps($All) {
   }
 }
 
-# Sessions of the apps the widget is allowed to show (music players, browsers).
-function Get-AllSessions {
+function Get-EverySession {
   $all = New-Object -TypeName System.Collections.ArrayList
   try {
     $sessions = $script:manager.GetSessions()
@@ -186,6 +275,12 @@ function Get-AllSessions {
     $current = $script:manager.GetCurrentSession()
     if ($null -ne $current) { [void]$all.Add($current) }
   }
+  return ,$all
+}
+
+# Sessions of the apps the widget is allowed to show (music players, browsers).
+function Get-AllSessions {
+  $all = Get-EverySession
   Publish-Apps $all
 
   $list = New-Object -TypeName System.Collections.ArrayList
@@ -259,6 +354,32 @@ function Get-Milliseconds($TimeSpan) {
   try { return [Math]::Round($TimeSpan.TotalMilliseconds) } catch { return 0 }
 }
 
+function Get-Controls($Info) {
+  $controls = $Info.Controls
+  $mask = 0
+  if ($controls.IsPlayEnabled) { $mask = $mask -bor 1 }
+  if ($controls.IsPauseEnabled) { $mask = $mask -bor 2 }
+  if ($controls.IsNextEnabled) { $mask = $mask -bor 4 }
+  if ($controls.IsPreviousEnabled) { $mask = $mask -bor 8 }
+  if ($controls.IsPlaybackPositionEnabled) { $mask = $mask -bor 16 }
+  if ($controls.IsShuffleEnabled) { $mask = $mask -bor 32 }
+  if ($controls.IsRepeatEnabled) { $mask = $mask -bor 64 }
+  if ($controls.IsPlayPauseToggleEnabled) { $mask = $mask -bor 128 }
+  return $mask
+}
+
+# The volume-mixer level of the app behind a session, or $null.
+function Get-AppVolume([string]$AppId) {
+  if (-not $script:native -or -not $AppId) { return $null }
+  try {
+    $volume = [MusicOverlayer.AudioApps]::Get($AppId)
+    if ($volume.Found) { return $volume }
+  } catch {
+    Send-Error "Couldn't read the player's volume: $($_.Exception.Message)"
+  }
+  return $null
+}
+
 function Read-SessionState($Session) {
   $info = $Session.GetPlaybackInfo()
   $timeline = $Session.GetTimelineProperties()
@@ -269,17 +390,6 @@ function Read-SessionState($Session) {
   } catch {
     Send-Error "Couldn't read track details: $($_.Exception.Message)"
   }
-
-  $controls = $info.Controls
-  $mask = 0
-  if ($controls.IsPlayEnabled) { $mask = $mask -bor 1 }
-  if ($controls.IsPauseEnabled) { $mask = $mask -bor 2 }
-  if ($controls.IsNextEnabled) { $mask = $mask -bor 4 }
-  if ($controls.IsPreviousEnabled) { $mask = $mask -bor 8 }
-  if ($controls.IsPlaybackPositionEnabled) { $mask = $mask -bor 16 }
-  if ($controls.IsShuffleEnabled) { $mask = $mask -bor 32 }
-  if ($controls.IsRepeatEnabled) { $mask = $mask -bor 64 }
-  if ($controls.IsPlayPauseToggleEnabled) { $mask = $mask -bor 128 }
 
   $shuffle = $null
   if ($null -ne $info.IsShuffleActive) { $shuffle = [bool]$info.IsShuffleActive }
@@ -307,6 +417,14 @@ function Read-SessionState($Session) {
   }
   $key = "$app|$title|$artist|$album"
 
+  $level = $null
+  $muted = $null
+  $volume = Get-AppVolume $app
+  if ($null -ne $volume) {
+    $level = [double]$volume.Level
+    $muted = [bool]$volume.Muted
+  }
+
   $state = [ordered]@{
     app = $app
     title = $title
@@ -319,9 +437,11 @@ function Read-SessionState($Session) {
     end = $end
     upd = $updated
     rate = $rate
-    ctl = $mask
+    ctl = (Get-Controls $info)
     shuffle = $shuffle
     repeat = $repeat
+    vol = $level
+    mute = $muted
     key = $key
   }
   return @{ State = $state; Props = $props; Key = $key }
@@ -338,61 +458,57 @@ function Publish-State($State, [int]$Count) {
 
 # --- Artwork --------------------------------------------------------------------------------------
 
-function Get-ImageMime([byte[]]$Bytes, [string]$ContentType) {
-  if ($Bytes.Length -ge 12) {
-    if ($Bytes[0] -eq 0x89 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x4E) { return 'image/png' }
-    if ($Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8) { return 'image/jpeg' }
-    if ($Bytes[0] -eq 0x47 -and $Bytes[1] -eq 0x49 -and $Bytes[2] -eq 0x46) { return 'image/gif' }
-    if ($Bytes[0] -eq 0x42 -and $Bytes[1] -eq 0x4D) { return 'image/bmp' }
-    if ($Bytes[0] -eq 0x52 -and $Bytes[1] -eq 0x49 -and $Bytes[8] -eq 0x57 -and $Bytes[9] -eq 0x45) { return 'image/webp' }
-  }
-  if ($ContentType -like 'image/*') { return $ContentType }
-  return 'image/png'
+function Get-ImageMime([byte[]]$Bytes) {
+  if ($null -eq $Bytes -or $Bytes.Length -lt 12) { return $null }
+  if ($Bytes[0] -eq 0x89 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x4E -and $Bytes[3] -eq 0x47) { return 'image/png' }
+  if ($Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8 -and $Bytes[2] -eq 0xFF) { return 'image/jpeg' }
+  if ($Bytes[0] -eq 0x47 -and $Bytes[1] -eq 0x49 -and $Bytes[2] -eq 0x46) { return 'image/gif' }
+  if ($Bytes[0] -eq 0x42 -and $Bytes[1] -eq 0x4D) { return 'image/bmp' }
+  if ($Bytes[0] -eq 0x52 -and $Bytes[1] -eq 0x49 -and $Bytes[2] -eq 0x46 -and $Bytes[3] -eq 0x46 -and
+      $Bytes[8] -eq 0x57 -and $Bytes[9] -eq 0x45 -and $Bytes[10] -eq 0x42 -and $Bytes[11] -eq 0x50) { return 'image/webp' }
+  return $null
 }
 
-function Read-ArtworkBytes($Reference) {
-  # First try a WinRT DataReader, then fall back to the .NET stream bridge.
-  try {
-    $stream = Wait-WinRT ($Reference.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType]) 4000
-    try {
-      $size = [uint32]$stream.Size
-      if ($size -eq 0 -or $size -gt 16000000) { return $null }
-      $dataReader = [Windows.Storage.Streams.DataReader]::new($stream)
-      try {
-        $null = Wait-WinRT ($dataReader.LoadAsync($size)) ([uint32]) 4000
-        $buffer = New-Object -TypeName byte[] -ArgumentList $size
-        $dataReader.ReadBytes($buffer)
-        return @{ Bytes = $buffer; ContentType = [string]$stream.ContentType }
-      } finally {
-        try { $null = $dataReader.DetachStream() } catch { }
-        try { $dataReader.Dispose() } catch { }
-      }
-    } finally {
-      try { $stream.Dispose() } catch { }
-    }
-  } catch { }
+# Players hand over streams PowerShell often can't see into (a bare System.__ComObject: Size
+# reads as $null and AsStreamForRead finds no overload). Going through the WinRT interface types
+# by reflection works whatever the stream's class is.
+$script:streamSize = [Windows.Storage.Streams.IRandomAccessStream].GetProperty('Size')
+$script:asStreamForRead = [System.IO.WindowsRuntimeStreamExtensions].GetMethod('AsStreamForRead', [Type[]]@([Windows.Storage.Streams.IInputStream]))
+$script:closeStream = [System.IDisposable].GetMethod('Dispose')
+$script:maxArtworkBytes = 16000000
 
-  $stream = Wait-WinRT ($Reference.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType]) 4000
-  try {
-    $netStream = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($stream)
-    $memory = New-Object -TypeName System.IO.MemoryStream
-    $netStream.CopyTo($memory)
-    return @{ Bytes = $memory.ToArray(); ContentType = [string]$stream.ContentType }
-  } finally {
-    try { $stream.Dispose() } catch { }
-  }
-}
-
+# Returns a hashtable with Mime, Base64 and Length, or with Why when there's no artwork.
 function Read-Artwork($Props) {
-  if ($null -eq $Props) { return $null }
-  $reference = $Props.Thumbnail
-  if ($null -eq $reference) { return $null }
-  $result = Read-ArtworkBytes $reference
-  if ($null -eq $result -or $null -eq $result.Bytes -or $result.Bytes.Length -eq 0) { return $null }
-  return @{
-    Mime = (Get-ImageMime $result.Bytes $result.ContentType)
-    Base64 = [Convert]::ToBase64String($result.Bytes)
+  if ($null -eq $Props) { return @{ Why = "the track details couldn't be read" } }
+  $reference = $null
+  try { $reference = $Props.Thumbnail } catch { }
+  if ($null -eq $reference) { return @{ Why = 'the player shares no artwork' } }
+
+  $stream = Wait-WinRT ($reference.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType]) 4000
+  $bytes = $null
+  try {
+    $size = 0
+    try { $size = [uint64]$script:streamSize.GetValue($stream) } catch { }
+    if ($size -gt $script:maxArtworkBytes) { return @{ Why = "the artwork is too large ($size bytes)" } }
+    $netStream = $script:asStreamForRead.Invoke($null, @($stream))
+    try {
+      $memory = New-Object -TypeName System.IO.MemoryStream
+      $netStream.CopyTo($memory)
+      $bytes = $memory.ToArray()
+    } finally {
+      try { $netStream.Dispose() } catch { }
+    }
+  } finally {
+    try { $null = $script:closeStream.Invoke($stream, $null) } catch { }
   }
+
+  $mime = Get-ImageMime $bytes
+  if ($null -eq $mime) {
+    $length = 0
+    if ($null -ne $bytes) { $length = $bytes.Length }
+    return @{ Why = "the artwork didn't read as an image ($length bytes)" }
+  }
+  return @{ Mime = $mime; Base64 = [Convert]::ToBase64String($bytes); Length = $bytes.Length }
 }
 
 # Artwork is read when the track changes and twice more shortly after, because some players
@@ -415,9 +531,9 @@ function Update-Cover($Props, [string]$Key) {
   $script:coverSchedule.RemoveAt(0)
 
   $art = $null
-  try { $art = Read-Artwork $Props } catch { Send-Error "Couldn't read artwork: $($_.Exception.Message)" }
+  try { $art = Read-Artwork $Props } catch { $art = @{ Why = $_.Exception.Message } }
   $base64 = ''
-  if ($null -ne $art) { $base64 = [string]$art.Base64 }
+  if ($null -ne $art.Base64) { $base64 = [string]$art.Base64 }
 
   if ($null -ne $script:coverSent) {
     if ($base64 -eq $script:coverSent) { return }
@@ -428,7 +544,8 @@ function Update-Cover($Props, [string]$Key) {
 
   $keyJson = ConvertTo-Json -InputObject $Key -Compress
   if ($base64 -eq '') {
-    Send-Line ('{"t":"cover","key":' + $keyJson + ',"mime":null,"b64":null}')
+    $whyJson = ConvertTo-Json -InputObject ([string]$art.Why) -Compress
+    Send-Line ('{"t":"cover","key":' + $keyJson + ',"mime":null,"b64":null,"why":' + $whyJson + '}')
   } else {
     Send-Line ('{"t":"cover","key":' + $keyJson + ',"mime":"' + $art.Mime + '","b64":"' + $base64 + '"}')
   }
@@ -440,16 +557,52 @@ function Update-Sessions {
   $script:selected = $session
   if ($null -eq $session) {
     $script:shownId = $null
+    $script:shownStatus = -1
     Publish-State $null 0
     return
   }
   $script:shownId = Get-AppId $session
   $result = Read-SessionState $session
+  $script:shownStatus = [int]$result.State.st
   Publish-State $result.State $list.Count
   Update-Cover $result.Props $result.Key
 }
 
+# --- Music-only equalizer: VB-CABLE routing --------------------------------------------------------
+
+function Send-CableStatus {
+  $id = $null
+  $routing = $false
+  $why = ''
+  if ($script:native) {
+    try { $id = [MusicOverlayer.AudioDevices]::FindCableInput() } catch { $why = $_.Exception.Message }
+    try { $routing = [MusicOverlayer.AudioRouting]::Available } catch { $why = $_.Exception.Message }
+    if (-not $routing -and -not $why) { $why = [string][MusicOverlayer.AudioRouting]::LastError }
+  } else {
+    $why = $script:nativeError
+  }
+  Send-Json ([ordered]@{ t = 'cable'; id = $id; routing = $routing; why = $why })
+}
+if (-not $Diagnose) { Send-CableStatus }
+
+function Send-Routed([string]$Type, [string]$AppId, [int]$Count, [string]$Why = '', [bool]$Exited = $false) {
+  $message = [ordered]@{ t = $Type; app = $AppId; n = $Count }
+  if ($Why) { $message.why = $Why }
+  if ($Exited) { $message.exited = $true }
+  Send-Json $message
+}
+
+# A routed player that quits gets its route undone right away (see AudioRouting.TakeExited).
+function Update-Routes {
+  if (-not $script:native) { return }
+  foreach ($app in [MusicOverlayer.AudioRouting]::TakeExited()) { Send-Routed 'unrouted' $app 1 '' $true }
+}
+
 # --- Commands -------------------------------------------------------------------------------------
+
+function Send-Ack([string]$Name, [bool]$Ok) {
+  Send-Json ([ordered]@{ t = 'ack'; cmd = $Name; ok = $Ok })
+}
 
 function Invoke-MediaCommand([string]$Line) {
   $parts = $Line.Trim() -split '\s+'
@@ -470,10 +623,52 @@ function Invoke-MediaCommand([string]$Line) {
     Set-Filter $argument
     return
   }
+  if ($name -eq 'cable') {
+    Send-CableStatus
+    return
+  }
+  if ($name -eq 'route') {
+    $count = 0
+    $why = ''
+    if (-not $script:native) { $why = $script:nativeError }
+    elseif (-not $script:shownId) { $why = 'no player is shown' }
+    else {
+      $count = [MusicOverlayer.AudioRouting]::Route($script:shownId, $argument)
+      if ($count -eq 0) { $why = [string][MusicOverlayer.AudioRouting]::LastError }
+      if ($count -eq 0 -and -not $why) { $why = "the player isn't playing through any output device yet" }
+    }
+    Send-Routed 'routed' ([string]$script:shownId) $count $why
+    return
+  }
+  if ($name -eq 'unroute') {
+    if (-not $script:native) { return }
+    if ($argument -eq '*') {
+      Send-Routed 'unrouted' '*' ([MusicOverlayer.AudioRouting]::UnrouteAll())
+      return
+    }
+    $app = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($argument))
+    Send-Routed 'unrouted' $app ([MusicOverlayer.AudioRouting]::Unroute($app))
+    return
+  }
+  if ($name -eq 'volume' -or $name -eq 'mute') {
+    # The volume-mixer level of the shown player, through the native helper.
+    $ok = $false
+    if ($script:native -and $script:shownId) {
+      if ($name -eq 'volume') {
+        $level = [double]::Parse($argument, [System.Globalization.CultureInfo]::InvariantCulture)
+        $ok = [MusicOverlayer.AudioApps]::SetLevel($script:shownId, $level) -gt 0
+      } else {
+        $ok = [MusicOverlayer.AudioApps]::SetMuted($script:shownId, ($argument -eq '1')) -gt 0
+      }
+    }
+    $script:lastStateJson = ''
+    Send-Ack $name $ok
+    return
+  }
 
   $session = $script:selected
   if ($null -eq $session) {
-    Send-Json ([ordered]@{ t = 'ack'; cmd = $name; ok = $false })
+    Send-Ack $name $false
     return
   }
 
@@ -501,7 +696,84 @@ function Invoke-MediaCommand([string]$Line) {
     return
   }
   $ok = [bool](Wait-WinRT $operation ([bool]) 3000)
-  Send-Json ([ordered]@{ t = 'ack'; cmd = $name; ok = $ok })
+  Send-Ack $name $ok
+}
+
+# --- Diagnostics ----------------------------------------------------------------------------------
+
+function Invoke-Diagnose {
+  Send-Line 'Music Overlayer media bridge diagnostics'
+  Send-Line "Windows PowerShell $($PSVersionTable.PSVersion) on Windows $([Environment]::OSVersion.Version)"
+  if ($script:native) { Send-Line "Native helper: loaded ($($script:nativeFrom), $($script:nativeMs) ms)" }
+  else { Send-Line "Native helper: NOT loaded after $($script:nativeMs) ms. $($script:nativeError)" }
+  try {
+    Connect-Manager
+  } catch {
+    Send-Line "Media sessions: can't connect. $($_.Exception.Message)"
+    return
+  }
+
+  $all = Get-EverySession
+  $current = ''
+  try { $current = Get-AppId $script:manager.GetCurrentSession() } catch { }
+  Send-Line ''
+  Send-Line "Media sessions: $($all.Count) (Windows' current one: $current)"
+  $statusNames = @('closed', 'opened', 'changing', 'stopped', 'playing', 'paused')
+  $repeatNames = @('none', 'track', 'list')
+  foreach ($session in $all) {
+    $app = Get-AppId $session
+    try {
+      $result = Read-SessionState $session
+      $state = $result.State
+      $status = "status $($state.st)"
+      if ($state.st -ge 0 -and $state.st -lt $statusNames.Count) { $status = $statusNames[$state.st] }
+      Send-Line ''
+      Send-Line "  $app"
+      Send-Line "    track: '$($state.title)' by '$($state.artist)' on '$($state.album)', $status"
+      Send-Line "    timeline: $([Math]::Round($state.pos / 1000))s of $([Math]::Round(($state.end - $state.start) / 1000))s"
+      $names = @()
+      $labels = @('play', 'pause', 'next', 'previous', 'seek', 'shuffle', 'repeat', 'play/pause')
+      for ($bit = 0; $bit -lt $labels.Count; $bit++) { if ($state.ctl -band (1 -shl $bit)) { $names += $labels[$bit] } }
+      Send-Line "    controls it allows: $($names -join ', ')"
+      $shuffle = 'not reported'
+      if ($null -ne $state.shuffle) { if ($state.shuffle) { $shuffle = 'on' } else { $shuffle = 'off' } }
+      $repeat = 'not reported'
+      if ($null -ne $state.repeat) { $repeat = $repeatNames[[int]$state.repeat] }
+      Send-Line "    shuffle: $shuffle, repeat: $repeat"
+      $art = $null
+      try { $art = Read-Artwork $result.Props } catch { $art = @{ Why = $_.Exception.Message } }
+      if ($null -ne $art.Base64) { Send-Line "    artwork: $($art.Length) bytes, $($art.Mime)" }
+      else { Send-Line "    artwork: none. $($art.Why)" }
+      if ($script:native) {
+        $volume = [MusicOverlayer.AudioApps]::Get($app)
+        if ($volume.Found) { Send-Line "    volume: $([Math]::Round($volume.Level * 100))%$(if ($volume.Muted) { ', muted' }) (processes: $($volume.Processes))" }
+        else { Send-Line "    volume: no audio session found for this app" }
+      }
+      if (-not (Test-Allowed $app)) { Send-Line '    (hidden by the player filter)' }
+    } catch {
+      Send-Line "  $app : couldn't read it. $($_.Exception.Message)"
+    }
+  }
+
+  if ($script:native) {
+    Send-Line ''
+    Send-Line 'Apps using audio:'
+    $script:writer.Write([MusicOverlayer.AudioApps]::Describe())
+    if ([MusicOverlayer.AudioApps]::LastError) { Send-Line "  error: $([MusicOverlayer.AudioApps]::LastError)" }
+
+    Send-Line ''
+    Send-Line 'Output devices:'
+    foreach ($output in [MusicOverlayer.AudioDevices]::Outputs()) { Send-Line "  $($output.Value)  $($output.Key)" }
+    $cable = [MusicOverlayer.AudioDevices]::FindCableInput()
+    if ($cable) { Send-Line "VB-CABLE: found ($cable)" } else { Send-Line 'VB-CABLE: not found' }
+    if ([MusicOverlayer.AudioRouting]::Available) { Send-Line "Per-app routing: available ($([MusicOverlayer.AudioRouting]::Variant) interface)" }
+    else { Send-Line "Per-app routing: NOT available. $([MusicOverlayer.AudioRouting]::LastError)" }
+  }
+}
+
+if ($Diagnose) {
+  Invoke-Diagnose
+  exit 0
 }
 
 # --- Main loop ------------------------------------------------------------------------------------
@@ -524,7 +796,7 @@ while ($true) {
         continue
       }
       $line = $pending.Result
-      if ($null -eq $line) { break }  # stdin closed: the widget has quit
+      if ($null -eq $line) { break }  # stdin closed: the widget has quit (or crashed)
       if ($line.Trim().Length -gt 0) {
         try {
           if ($null -eq $script:manager) { Connect-Manager }
@@ -556,7 +828,16 @@ while ($true) {
       $failures = 0
     }
   }
-  $nextPoll = [DateTime]::UtcNow.AddMilliseconds($PollMs)
+  try { Update-Routes } catch { Send-Error "Couldn't check routed players: $($_.Exception.Message)" }
+
+  # Read often while music plays; when it doesn't, nothing moves, so read less.
+  $interval = $IdlePollMs
+  if ($script:shownStatus -eq 4) { $interval = $PollMs }
+  $nextPoll = [DateTime]::UtcNow.AddMilliseconds($interval)
 }
 
+# Whatever happened to the widget, the music goes back to the normal output device.
+if ($script:native) {
+  try { $null = [MusicOverlayer.AudioRouting]::UnrouteAll() } catch { }
+}
 exit 0

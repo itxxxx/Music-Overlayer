@@ -15,6 +15,10 @@ export interface StoredState {
   apoUnlinked: boolean
   /** When the widget installed Equalizer APO (a restart is needed after that). */
   apoInstalledAt: number | null
+  /** When the widget installed VB-CABLE (Windows may need a restart before it shows up). */
+  cableInstalledAt: number | null
+  /** Players whose sound the widget sent to VB-CABLE and hasn't sent back yet (survives crashes). */
+  routedApps: string[]
 }
 
 function defaults(): StoredState {
@@ -25,7 +29,9 @@ function defaults(): StoredState {
     eq: sanitizeEq(DEFAULT_EQ),
     players: { ...DEFAULT_PLAYER_FILTER },
     apoUnlinked: false,
-    apoInstalledAt: null
+    apoInstalledAt: null,
+    cableInstalledAt: null,
+    routedApps: []
   }
 }
 
@@ -40,7 +46,8 @@ export function sanitizeWidgetSettings(input: unknown, base: WidgetSettings = DE
     idleDelayMs: num(raw.idleDelayMs, base.idleDelayMs, 1000, 30000),
     hoverDelayMs: num(raw.hoverDelayMs, base.hoverDelayMs, 0, 2000),
     visualizer: typeof raw.visualizer === 'boolean' ? raw.visualizer : base.visualizer,
-    demo: typeof raw.demo === 'boolean' ? raw.demo : base.demo
+    demo: typeof raw.demo === 'boolean' ? raw.demo : base.demo,
+    onlineCovers: typeof raw.onlineCovers === 'boolean' ? raw.onlineCovers : base.onlineCovers
   }
 }
 
@@ -57,7 +64,11 @@ function sanitize(input: unknown): StoredState {
     eq: sanitizeEq(raw.eq ?? DEFAULT_EQ),
     players: sanitizePlayerFilter(raw.players),
     apoUnlinked: raw.apoUnlinked === true,
-    apoInstalledAt: typeof raw.apoInstalledAt === 'number' && Number.isFinite(raw.apoInstalledAt) ? raw.apoInstalledAt : null
+    apoInstalledAt: typeof raw.apoInstalledAt === 'number' && Number.isFinite(raw.apoInstalledAt) ? raw.apoInstalledAt : null,
+    cableInstalledAt: typeof raw.cableInstalledAt === 'number' && Number.isFinite(raw.cableInstalledAt) ? raw.cableInstalledAt : null,
+    routedApps: Array.isArray(raw.routedApps)
+      ? raw.routedApps.filter((app): app is string => typeof app === 'string' && app.length > 0 && app.length < 400).slice(0, 10)
+      : []
   }
 }
 

@@ -5,11 +5,13 @@ import {
   desktopCapturer,
   ipcMain,
   nativeImage,
+  powerMonitor,
   session,
   shell,
   type IpcMainEvent,
   type IpcMainInvokeEvent
 } from 'electron'
+import { cpus } from 'node:os'
 import { clamp, sanitizeEq } from '../shared/eq'
 import { togglePlayer, type PlayerFilter } from '../shared/apps'
 import { APP_NAME, type EqStatus, type InitialState, type MediaCommand, type MediaSession, type WidgetSettings } from '../shared/types'
@@ -21,6 +23,7 @@ import { log } from './log'
 import { buildMenu, type MenuContext } from './menu'
 import { resourcePath } from './paths'
 import { MAX_BOOST, SettingsStore, sanitizeBoosts } from './settings'
+import { AppUpdater } from './updater'
 import { WidgetWindow } from './widget-window'
 
 const isWindows = process.platform === 'win32'
@@ -33,6 +36,11 @@ if (isWindows) {
   // straight away. Skipping Windows Graphics Capture keeps Windows from drawing a capture border.
   app.commandLine.appendSwitch('disable-features', 'AllowWgcScreenCapturer,AllowWgcWindowCapturer')
 }
+
+/** How often the tray menu's CPU and memory line is brought up to date. */
+const USAGE_EVERY_MS = 5000
+/** How often main.log gets a CPU and memory line per process. */
+const USAGE_LOG_EVERY_MS = 5 * 60_000
 
 /** How long the screen list may take before the visualizer goes without system audio. */
 const SCREEN_LIST_TIMEOUT_MS = 5000
@@ -75,8 +83,20 @@ async function main(): Promise<void> {
     onVisibilityChange: (visible) => {
       if (visible) startAudioCapture()
     },
-    onPageHung: () => recoverPage("The overlay's page stopped responding")
+    onPageHung: () => recoverPage("The overlay's page stopped responding"),
+    onPageNotPainting: () => {
+      // Seen once, when the page captured itself for the visualizer. Reload once per run, and
+      // only while someone is at the PC (a locked or sleeping screen draws nothing either).
+      const state = powerMonitor.getSystemIdleState(60)
+      if (paintReloadUsed || state !== 'active') {
+        log('widget', `the overlay stopped drawing (user ${state}); not reloading`)
+        return
+      }
+      paintReloadUsed = true
+      recoverPage('The overlay stopped drawing')
+    }
   })
+  let paintReloadUsed = false
   const media = new MediaHub({ filter: settings.get().players, onlineCovers: settings.get().widget.onlineCovers })
   let tray: Tray | null = null
   let eqStatus: EqStatus
@@ -126,6 +146,13 @@ async function main(): Promise<void> {
     const boost = musicEq.current.boostAvailable ? (settings.get().boosts[current.appId] ?? 1) : 1
     return { ...current, boost }
   }
+
+  const updater = new AppUpdater({
+    onStatus: (status) => {
+      widget.send('update:status', status)
+      refreshTray()
+    }
+  })
 
   const mediaMode = (): MediaMode => (settings.get().widget.demo || !isWindows || forceDemo ? 'demo' : 'windows')
   const canStartAtLogin = isWindows && app.isPackaged
@@ -196,6 +223,48 @@ async function main(): Promise<void> {
     refreshTray()
   }
 
+  /**
+   * Windows lists each of the overlay's processes on its own in Task Manager (it only groups apps
+   * with a taskbar window), so the tray menu shows the total: every Electron process plus the
+   * PowerShell media reader. CPU is a share of the whole processor, like Task Manager's.
+   */
+  let usage: string | null = null
+  // First breakdown a minute after start, then every few minutes.
+  let usageLoggedAt = Date.now() - USAGE_LOG_EVERY_MS + 60_000
+  const updateUsage = (): void => {
+    const cores = Math.max(1, cpus().length)
+    let cpu = 0
+    let memoryKb = 0
+    const parts: string[] = []
+    for (const metric of app.getAppMetrics()) {
+      const kb = metric.memory.privateBytes ?? metric.memory.workingSetSize
+      cpu += metric.cpu.percentCPUUsage
+      memoryKb += kb
+      const name = metric.serviceName ? metric.serviceName.split('.')[0] : metric.type
+      parts.push(`${name} ${(metric.cpu.percentCPUUsage / cores).toFixed(1)}% ${Math.round(kb / 1024)} MB`)
+    }
+    // Chromium counts CPU per core (one busy core is 100%); Task Manager counts the whole CPU.
+    cpu /= cores
+    let memoryMb = memoryKb / 1024
+    const helper = media.helperUsage
+    if (helper) {
+      cpu += helper.cpuPercent
+      memoryMb += helper.memoryMb
+      parts.push(`PowerShell ${helper.cpuPercent.toFixed(1)}% ${Math.round(helper.memoryMb)} MB`)
+    }
+    // Now and then, the breakdown per process for the log (to see what a high total comes from).
+    if (Date.now() - usageLoggedAt >= USAGE_LOG_EVERY_MS) {
+      usageLoggedAt = Date.now()
+      log('usage', `${cpu.toFixed(1)}% CPU, ${Math.round(memoryMb)} MB: ${parts.join(', ')}`)
+    }
+    const next = `Using ${cpu < 0.05 ? '0' : cpu.toFixed(1)}% CPU and ${Math.round(memoryMb)} MB of memory`
+    if (next === usage) return
+    usage = next
+    refreshTray()
+  }
+  // The first reading comes after one interval: Chromium needs two to work out CPU use.
+  const usageTimer = setInterval(updateUsage, USAGE_EVERY_MS)
+
   const menuContext = (): MenuContext => ({
     visible: widget.isVisible(),
     settings: settings.get().widget,
@@ -203,6 +272,10 @@ async function main(): Promise<void> {
     players: settings.get().players,
     seenApps: media.seenApps,
     isWindows,
+    usage,
+    update: updater.current,
+    checkForUpdates: () => void updater.check(),
+    installUpdate: () => updater.install(),
     canStartAtLogin,
     startAtLogin: canStartAtLogin && app.getLoginItemSettings().openAtLogin,
     toggleVisible: () => setVisible(!widget.isVisible()),
@@ -226,6 +299,16 @@ async function main(): Promise<void> {
     resetPosition: () => widget.resetPosition(),
     restart: () => {
       log('app', 'restart from the menu')
+      // A downloaded update installs on this restart.
+      if (updater.current.state === 'ready') {
+        updater.install()
+        return
+      }
+      if (!app.isPackaged) {
+        // In development the page comes from the dev server, which stops with the app.
+        widget.win?.webContents.reload()
+        return
+      }
       // The portable build runs from a temporary copy; start the portable file itself again.
       const portable = process.env.PORTABLE_EXECUTABLE_FILE
       app.releaseSingleInstanceLock()
@@ -240,12 +323,11 @@ async function main(): Promise<void> {
   }
 
   // System audio for the visualizer: answer the page's getDisplayMedia() with loopback audio.
-  // The video it also has to return is the page itself, which costs nothing and doesn't involve
-  // the screen; it's dropped straight away. Should that ever come back without sound, the
-  // screen is used instead (listing screens can be slow, so it's given a time limit).
-  let loopbackViaScreen = false
+  // Chromium also wants a video source; the screen's is dropped by the page straight away.
+  // (Not the page itself: capturing its own window stopped the overlay drawing on Windows.)
+  // Listing screens can be slow, so it gets a time limit.
   if (isWindows) {
-    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
       let answered = false
       const answer = (streams: Parameters<typeof callback>[0]): void => {
         if (answered) return
@@ -255,10 +337,6 @@ async function main(): Promise<void> {
         } catch (error) {
           log('audio', `capture answer refused: ${error instanceof Error ? error.message : String(error)}`)
         }
-      }
-      if (request.frame && !loopbackViaScreen) {
-        answer({ video: request.frame, audio: 'loopback' })
-        return
       }
       const timer = setTimeout(() => {
         log('audio', 'listing screens took too long')
@@ -299,6 +377,7 @@ async function main(): Promise<void> {
       eq: settings.get().eq,
       eqStatus,
       musicEq: musicEq.current,
+      update: updater.current,
       testCableInput: process.env.MUSIC_OVERLAYER_FAKE_CABLE_INPUT || undefined,
       direction: widget.direction,
       media: { session: withBoost(media.session), cover: media.cover, status: media.status }
@@ -324,8 +403,13 @@ async function main(): Promise<void> {
   ipcMain.on('widget:pointer-seen', (event) => {
     if (isOwnSender(event)) widget.pageSawPointer()
   })
-  ipcMain.on('widget:alive', (event) => {
-    if (isOwnSender(event)) widget.pageAlive()
+  ipcMain.on('widget:alive', (event, painted: unknown, longestTaskMs: unknown) => {
+    if (!isOwnSender(event)) return
+    widget.pageAlive(painted !== false)
+    if (typeof longestTaskMs === 'number' && longestTaskMs >= 1000) log('page', `was busy for ${Math.round(longestTaskMs)} ms without a break`)
+  })
+  ipcMain.on('widget:step', (event, step: unknown) => {
+    if (isOwnSender(event) && typeof step === 'string') log('page', step)
   })
   ipcMain.on('widget:hit-rect', (event, rect: unknown) => {
     if (isOwnSender(event)) widget.setHitRect(rect as never)
@@ -371,11 +455,11 @@ async function main(): Promise<void> {
   ipcMain.on('audio:start', (event) => {
     if (isOwnSender(event)) startAudioCapture()
   })
+  let noAudioLogged = false
   ipcMain.on('audio:no-system-audio', (event) => {
-    if (!isOwnSender(event) || loopbackViaScreen || !isWindows) return
-    log('audio', 'no system audio through the page capture; using the screen capture instead')
-    loopbackViaScreen = true
-    setTimeout(startAudioCapture, 500)
+    if (!isOwnSender(event) || !isWindows || noAudioLogged) return
+    noAudioLogged = true
+    log('audio', 'no system audio for the visualizer; it shows simulated bars')
   })
   ipcMain.handle('music-eq:install', async (event) => {
     if (!isOwnSender(event)) return musicEq.current
@@ -389,12 +473,25 @@ async function main(): Promise<void> {
     const { running, error } = state as { running?: unknown; error?: unknown }
     musicEq.setPipelineState(running === true, typeof error === 'string' ? error.slice(0, 300) : null)
   })
+  ipcMain.on('update:install', (event) => {
+    if (isOwnSender(event)) updater.install()
+  })
   ipcMain.on('music-eq:download', (event) => {
     if (isOwnSender(event)) void shell.openExternal(CABLE_PAGE)
   })
 
   const win = widget.create(!settings.get().hidden)
+  win.once('ready-to-show', () => log('widget', 'first frame drawn'))
+  // The page's own warnings and errors, for the log (a few dozen at most per run).
+  let pageMessages = 0
+  win.webContents.on('console-message', (details) => {
+    if ((details.level !== 'warning' && details.level !== 'error') || pageMessages >= 40) return
+    pageMessages++
+    log('page', `${details.level}: ${details.message} (${details.sourceId.split('/').pop() ?? ''}:${details.lineNumber})`)
+  })
+  win.webContents.on('did-fail-load', (_event, code, description) => log('widget', `page failed to load: ${description} (${code})`))
   win.webContents.on('did-finish-load', () => {
+    log('widget', 'page loaded')
     reloading = false
     // The widget's hit-testing assumes page pixels are window pixels.
     win.webContents.setZoomFactor(1)
@@ -432,8 +529,12 @@ async function main(): Promise<void> {
     console.warn('[tray] unavailable', error)
   }
 
+  updater.start()
+
   app.on('second-instance', () => setVisible(true))
   app.on('before-quit', () => {
+    clearInterval(usageTimer)
+    updater.dispose()
     // Stopping the bridge also sends any routed player back to the normal output device.
     musicEq.dispose()
     settings.flush()

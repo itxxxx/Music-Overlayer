@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion'
 import {
+  ArrowDownToLine,
   ArrowLeftRight,
   Pause,
   Play,
@@ -60,6 +61,12 @@ export interface NowPlayingCardProps {
   notice?: string | null
   /** Small line under the controls. */
   credit?: string
+  /**
+   * Takes the credit line's place while there's news about an update: a button when there's
+   * something to do ("Restart to update to 1.3.0"), plain text while it downloads.
+   */
+  update?: { label: string; action: boolean } | null
+  onUpdate?(): void
   onToggle(): void
   onNext(): void
   onPrev(): void
@@ -154,7 +161,14 @@ function TimelineRow({
   const shownPosition = scrub !== null && hasTimeline ? scrub * durationMs : position
   return (
     <div className="mt-3 px-0.5">
-      <TimelineSlider value={scrub ?? progress} disabled={!canSeek} onScrub={setScrub} onSeek={(ratio) => onSeek(ratio * durationMs)} />
+      <TimelineSlider
+        value={scrub ?? progress}
+        disabled={!canSeek}
+        // About 290 px of bar: below 75 s a 250 ms update moves it more than a pixel.
+        smooth={hasTimeline && durationMs < 75_000}
+        onScrub={setScrub}
+        onSeek={(ratio) => onSeek(ratio * durationMs)}
+      />
       <div className="mt-1 flex justify-between text-[11px] font-bold tabular-nums leading-4 text-white/55">
         <span>{formatTime(shownPosition)}</span>
         <span>{hasTimeline ? formatTime(durationMs) : '–:––'}</span>
@@ -318,8 +332,25 @@ export function NowPlayingCard(props: NowPlayingCardProps) {
         </div>
       )}
 
-      {props.credit && (
-        <p className="-mb-1 mt-2 text-center text-[10px] font-semibold leading-3 tracking-[0.02em] text-white/30">{props.credit}</p>
+      {props.update?.action ? (
+        <div className="-mb-1 mt-2 flex justify-center">
+          <button
+            type="button"
+            data-no-drag
+            onClick={props.onUpdate}
+            className="flex h-6 items-center gap-1.5 rounded-full px-3 text-[11px] font-bold leading-4 transition-[filter] hover:brightness-110"
+            style={{ background: palette.tint, color: palette.tintInk }}
+          >
+            <ArrowDownToLine className="size-3.5" strokeWidth={2.6} />
+            {props.update.label}
+          </button>
+        </div>
+      ) : props.update ? (
+        <p className="-mb-1 mt-2 text-center text-[10px] font-semibold leading-3 tracking-[0.02em] text-white/45">{props.update.label}</p>
+      ) : (
+        props.credit && (
+          <p className="-mb-1 mt-2 text-center text-[10px] font-semibold leading-3 tracking-[0.02em] text-white/30">{props.credit}</p>
+        )
       )}
     </div>
   )

@@ -21,6 +21,13 @@ export interface RouteResult {
   exited?: boolean
 }
 
+/** What a helper process of the source (the PowerShell bridge) uses. */
+export interface HelperUsage {
+  /** Share of the whole CPU, like Task Manager shows it (0–100). */
+  cpuPercent: number
+  memoryMb: number
+}
+
 export interface MediaSourceEvents {
   session: [MediaSession | null]
   cover: [MediaCover]
@@ -49,4 +56,8 @@ export abstract class MediaSource extends EventEmitter<MediaSourceEvents> {
   route(_endpointId: string): void {}
   /** Send an app's sound (or "*": everything routed) back to the default device. */
   unroute(_appId: string): void {}
+  /** CPU and memory of the source's own helper process, if it has one. */
+  get helperUsage(): HelperUsage | null {
+    return null
+  }
 }

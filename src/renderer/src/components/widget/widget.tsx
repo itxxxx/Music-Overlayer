@@ -355,6 +355,15 @@ export function Widget() {
   const isBrowser = session ? classifyPlayer(session.appId).kind === 'browser' : false
   const volumeLabel = session?.appName ? `${session.appName} volume${isBrowser ? ' (the whole browser)' : ''}` : 'Volume'
   const musicEq = useWidget((state) => state.musicEq)
+  const update = useWidget((state) => state.update)
+  const updateNotice =
+    update.state === 'ready'
+      ? { label: `Restart to update to ${update.version}`, action: true }
+      : update.state === 'available'
+        ? { label: `Get version ${update.version}`, action: true }
+        : update.state === 'downloading'
+          ? { label: `Downloading version ${update.version}… ${update.percent}%`, action: false }
+          : null
   const volumeHint =
     musicEq.supported && !musicEq.boostAvailable ? 'To go up to 200%, set up VB-CABLE in the equalizer (Music only).' : null
 
@@ -508,6 +517,8 @@ export function Widget() {
                     showVisualizer={!empty}
                     notice={bridgeProblem ? (bridge.message ?? null) : notice}
                     credit={`${APP_NAME}, ${APP_CREDIT}`}
+                    update={updateNotice}
+                    onUpdate={() => api.update.install()}
                     onToggle={playback.toggle}
                     onNext={playback.next}
                     onPrev={playback.prev}

@@ -17,6 +17,12 @@ extraResources:
     to: tray.png
 asar: true
 npmRebuild: false
+# Where the app looks for updates (written into the app as app-update.yml). Releases are uploaded
+# by the GitHub workflow, not by electron-builder, so building never publishes anything.
+publish:
+  provider: github
+  owner: itxxxx
+  repo: Music-Overlayer
 win:
   icon: resources/icon.ico
   target:

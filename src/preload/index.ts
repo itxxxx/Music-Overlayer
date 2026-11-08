@@ -22,7 +22,8 @@ const api: WidgetApi = {
 
   setInteractive: (interactive) => ipcRenderer.send('widget:interactive', interactive),
   pointerSeen: () => ipcRenderer.send('widget:pointer-seen'),
-  alive: () => ipcRenderer.send('widget:alive'),
+  alive: (painted, longestTaskMs) => ipcRenderer.send('widget:alive', painted === true, longestTaskMs),
+  reportStep: (step) => ipcRenderer.send('widget:step', String(step).slice(0, 300)),
   setHitRect: (rect) => ipcRenderer.send('widget:hit-rect', rect),
   setPointerActive: (active) => ipcRenderer.send('widget:pointer-active', active),
   startDrag: () => ipcRenderer.send('widget:drag-start'),
@@ -43,6 +44,11 @@ const api: WidgetApi = {
     refreshStatus: () => ipcRenderer.invoke('eq:status'),
     openDownloadPage: () => ipcRenderer.send('eq:download'),
     onStatus: (listener) => subscribe('eq:status', listener)
+  },
+
+  update: {
+    onStatus: (listener) => subscribe('update:status', listener),
+    install: () => ipcRenderer.send('update:install')
   },
 
   musicEq: {

@@ -6,7 +6,7 @@ import { log } from './log'
 const EDGE_GAP = 8
 /** Cursor checks: often near the widget, rarely when the cursor is far away or the widget is hidden. */
 const POLL_NEAR_MS = 40
-const POLL_FAR_MS = 150
+const POLL_FAR_MS = 250
 const POLL_HIDDEN_MS = 500
 const NEAR_DISTANCE = 140
 const LEAVE_GRACE_MS = 250
@@ -17,6 +17,8 @@ const PAGE_SAW_POINTER_MS = 800
 const DRAG_LIMIT_MS = 60_000
 /** The page checks in every 2 s while shown; this much silence means it hangs. */
 const PAGE_SILENCE_MS = 12_000
+/** The page still checks in but hasn't drawn a frame for this long. */
+const PAGE_NO_PAINT_MS = 15_000
 
 interface WidgetWindowOptions {
   getPosition(): PillPosition | null
@@ -25,6 +27,8 @@ interface WidgetWindowOptions {
   onVisibilityChange?(visible: boolean): void
   /** The page stopped checking in while shown: it hangs and needs reloading. */
   onPageHung?(): void
+  /** The page checks in but draws nothing while shown (the window shows nothing). */
+  onPageNotPainting?(): void
 }
 
 /**
@@ -46,6 +50,8 @@ export class WidgetWindow {
   private lastDisagreementLog = 0
   private pageAliveAt = 0
   private pageHungReported = false
+  private pagePaintedAt = 0
+  private paintStallReported = false
   private pointerActive = false
   private pointerActiveSince = 0
   private dragging = false
@@ -122,7 +128,7 @@ export class WidgetWindow {
 
   show(): void {
     if (!this.win || this.win.isDestroyed()) return
-    this.pageAlive()
+    this.pageAlive(true)
     // Hidden, the page may sleep; shown, its animations and timers must run at full speed.
     this.win.webContents.setBackgroundThrottling(false)
     this.win.showInactive()
@@ -163,10 +169,14 @@ export class WidgetWindow {
     this.cursorWhenPageSawIt = screen.getCursorScreenPoint()
   }
 
-  /** The page checks in regularly; see PAGE_SILENCE_MS. */
-  pageAlive(): void {
+  /** The page checks in regularly, saying whether it drew a frame since; see PAGE_SILENCE_MS. */
+  pageAlive(painted: boolean): void {
     this.pageAliveAt = Date.now()
     this.pageHungReported = false
+    if (painted) {
+      this.pagePaintedAt = this.pageAliveAt
+      this.paintStallReported = false
+    }
   }
 
   /** The page is about to be reloaded: forget what the old one said. */
@@ -176,7 +186,7 @@ export class WidgetWindow {
     this.pointerActive = false
     this.endDrag()
     this.setInteractive(false)
-    this.pageAlive()
+    this.pageAlive(true)
   }
 
   setHitRect(rect: HitRect | null): void {
@@ -400,11 +410,18 @@ export class WidgetWindow {
   }
 
   private checkPageAlive(): void {
-    if (this.pageHungReported || !this.pageAliveAt) return
-    if (Date.now() - this.pageAliveAt < PAGE_SILENCE_MS) return
-    this.pageHungReported = true
-    this.pageHover = false
-    this.setInteractive(false)
-    this.options.onPageHung?.()
+    if (!this.pageAliveAt) return
+    const now = Date.now()
+    if (!this.pageHungReported && now - this.pageAliveAt >= PAGE_SILENCE_MS) {
+      this.pageHungReported = true
+      this.pageHover = false
+      this.setInteractive(false)
+      this.options.onPageHung?.()
+      return
+    }
+    if (!this.paintStallReported && this.pagePaintedAt && now - this.pagePaintedAt >= PAGE_NO_PAINT_MS) {
+      this.paintStallReported = true
+      this.options.onPageNotPainting?.()
+    }
   }
 }

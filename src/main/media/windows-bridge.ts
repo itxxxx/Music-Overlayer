@@ -5,7 +5,8 @@ import { appDisplayName, playerPatterns, type PlayerFilter } from '../../shared/
 import type { MediaCommand, MediaSession, PlaybackStatus, RepeatMode } from '../../shared/types'
 import { log } from '../log'
 import { resourcePath, systemExecutable } from '../paths'
-import { MediaSource, type CableInfo, type RouteResult } from './media-source'
+import { cpus } from 'node:os'
+import { MediaSource, type CableInfo, type HelperUsage, type RouteResult } from './media-source'
 
 /** Session as printed by resources/media-bridge.ps1. */
 export interface RawSession {
@@ -42,7 +43,7 @@ type BridgeMessage =
   | { t: 'error'; message: string }
   | { t: 'fatal'; message: string }
   | { t: 'apps'; ids: string[] }
-  | { t: 'alive' }
+  | { t: 'usage'; cpuMs?: number; memKb?: number }
 
 /** The filter as the bridge expects it: base64 of {"allow": regex, "block": regex}. */
 export function encodeFilter(filter: PlayerFilter): string {
@@ -88,7 +89,7 @@ export function toMediaSession(raw: RawSession, count: number, receivedAt: numbe
 
 /** A bridge that hasn't said "ready" by then is stuck (it normally takes a few seconds). */
 const READY_TIMEOUT_MS = 45_000
-/** The bridge says something at least every 5 s; this much silence means it hangs. */
+/** The bridge reports its usage every 5 s; this much silence means it hangs. */
 const SILENCE_TIMEOUT_MS = 40_000
 const WATCHDOG_MS = 5000
 
@@ -135,6 +136,8 @@ export class WindowsMediaBridge extends MediaSource {
   private lastLineAt = 0
   private ready = false
   private watchdog: NodeJS.Timeout | null = null
+  /** The last two usage reports, to work out the CPU share between them. */
+  private usageReports: { at: number; cpuMs: number; memKb: number }[] = []
 
   constructor(filter: PlayerFilter) {
     super()
@@ -220,10 +223,12 @@ export class WindowsMediaBridge extends MediaSource {
       'Bypass',
       '-File',
       script,
+      // Once a second while music plays (the widget moves the timeline by itself in between;
+      // a click on its buttons gets an answer straight away), every 2 s otherwise.
       '-PollMs',
-      '500',
+      '1000',
       '-IdlePollMs',
-      '1500',
+      '2000',
       '-Filter',
       encodeFilter(this.filter)
     ]
@@ -239,6 +244,7 @@ export class WindowsMediaBridge extends MediaSource {
     this.launchedAt = Date.now()
     this.lastLineAt = this.launchedAt
     this.ready = false
+    this.usageReports = []
     this.startWatchdog()
     log('bridge', `started (pid ${child.pid ?? '?'})`)
     let stderr = ''
@@ -351,10 +357,26 @@ export class WindowsMediaBridge extends MediaSource {
           if (REFUSABLE.has(message.cmd as MediaCommand['type'])) this.emit('refused', message.cmd as MediaCommand['type'])
         }
         break
+      case 'usage':
+        if (typeof message.cpuMs === 'number' && typeof message.memKb === 'number') {
+          this.usageReports = [...this.usageReports.slice(-1), { at: Date.now(), cpuMs: message.cpuMs, memKb: message.memKb }]
+        }
+        break
       case 'apps':
         if (Array.isArray(message.ids)) this.emit('apps', message.ids.filter((id) => typeof id === 'string'))
         break
     }
+  }
+
+  get helperUsage(): HelperUsage | null {
+    const last = this.usageReports.at(-1)
+    const previous = this.usageReports.length > 1 ? this.usageReports[0] : undefined
+    if (!this.child || !last) return null
+    let cpuPercent = 0
+    if (previous && last.at > previous.at) {
+      cpuPercent = Math.max(0, ((last.cpuMs - previous.cpuMs) / (last.at - previous.at)) * 100) / Math.max(1, cpus().length)
+    }
+    return { cpuPercent, memoryMb: last.memKb / 1024 }
   }
 
   /**

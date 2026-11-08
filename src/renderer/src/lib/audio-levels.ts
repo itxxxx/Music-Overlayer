@@ -6,6 +6,8 @@
  * a synthetic spectrum keeps the bars alive while something is playing.
  */
 
+import { step } from './diagnostics'
+
 export const FFT_SIZE = 2048
 
 export interface SpectrumFrame {
@@ -34,6 +36,8 @@ class AudioLevels {
   private readonly listeners = new Set<Listener>()
   private readonly spectrum = new Uint8Array(new ArrayBuffer(FFT_SIZE / 2))
   private raf = 0
+  /** Waiting out the time to the next frame (below the display's rate, see `scheduleNext`). */
+  private wait = 0
   private live: LiveCapture | null = null
   private starting: Promise<boolean> | null = null
   private playing = false
@@ -95,6 +99,34 @@ class AudioLevels {
     this.frameInterval = 1000 / Math.max(1, fps)
   }
 
+  private get scheduled(): boolean {
+    return this.raf !== 0 || this.wait !== 0
+  }
+
+  private cancelFrames(): void {
+    cancelAnimationFrame(this.raf)
+    window.clearTimeout(this.wait)
+    this.raf = 0
+    this.wait = 0
+  }
+
+  /**
+   * Below the display's rate, sleep until the next frame is due instead of asking for every
+   * frame and skipping some: each animation-frame request makes Chromium produce a frame, so
+   * skipping would still wake the page and the GPU 60 times a second.
+   */
+  private scheduleNext(now: number): void {
+    const delay = this.lastFrameAt + this.frameInterval - now - 8
+    if (delay <= 0) {
+      this.raf = requestAnimationFrame(this.frame)
+      return
+    }
+    this.wait = window.setTimeout(() => {
+      this.wait = 0
+      this.raf = requestAnimationFrame(this.frame)
+    }, delay)
+  }
+
   /** Called when the loopback stream dies (e.g. the output device changed). */
   setLiveEndedHandler(handler: () => void): void {
     this.onLiveEnded = handler
@@ -130,24 +162,23 @@ class AudioLevels {
     const live = this.live
     this.live = null
     if (!live) return
+    step('visualizer', 'stopped listening')
     live.stream.getTracks().forEach((track) => track.stop())
     void live.context.close().catch(() => undefined)
   }
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener)
-    if (!this.raf) this.raf = requestAnimationFrame(this.frame)
+    if (!this.scheduled) this.raf = requestAnimationFrame(this.frame)
     return () => {
       this.listeners.delete(listener)
-      if (this.listeners.size === 0 && this.raf) {
-        cancelAnimationFrame(this.raf)
-        this.raf = 0
-      }
+      if (this.listeners.size === 0) this.cancelFrames()
     }
   }
 
   private async openLoopback(): Promise<boolean> {
     let stream: MediaStream | null = null
+    step('visualizer', 'asking for system audio')
     try {
       const request = navigator.mediaDevices.getDisplayMedia({
         audio: true,
@@ -174,6 +205,7 @@ class AudioLevels {
       }
       const audio = stream.getAudioTracks()[0]
       if (!audio) throw new Error('No system audio track')
+      step('visualizer', 'got system audio, starting its audio graph')
 
       const context = new AudioContext({ latencyHint: 'playback' })
       const source = context.createMediaStreamSource(stream)
@@ -197,10 +229,12 @@ class AudioLevels {
       })
       this.live = { context, analyser, stream }
       if (!this.playing) this.scheduleIdle()
+      step('visualizer', 'listening')
       return true
     } catch (error) {
       stream?.getTracks().forEach((track) => track.stop())
       console.info('[visualizer] system audio unavailable, using simulated levels:', error)
+      step('visualizer', `no system audio (${error instanceof Error ? error.message : String(error)})`)
       this.onNoAudio?.()
       return false
     }
@@ -209,9 +243,10 @@ class AudioLevels {
   private frame = (now: number): void => {
     this.raf = 0
     if (this.listeners.size === 0) return
-    // Skip frames beyond the cap; 1 ms of slack keeps a 60 Hz display at a steady 60.
+    // Too early (the display runs faster than the cap): wait for the next one. 1 ms of slack
+    // keeps a 60 Hz display at a steady 60.
     if (now - this.lastFrameAt < this.frameInterval - 1) {
-      this.raf = requestAnimationFrame(this.frame)
+      this.scheduleNext(now)
       return
     }
     this.lastFrameAt = now
@@ -233,7 +268,7 @@ class AudioLevels {
     }
     const frame: SpectrumFrame = { spectrum: this.spectrum, sampleRate, live: this.live !== null || this.external !== null }
     for (const listener of this.listeners) listener(frame, now)
-    this.raf = requestAnimationFrame(this.frame)
+    this.scheduleNext(now)
   }
 
   /** A plausible spectrum: a kick on the beat, moving mids, ticking hats. */

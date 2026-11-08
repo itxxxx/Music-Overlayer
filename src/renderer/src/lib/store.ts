@@ -9,6 +9,7 @@ import type {
   MediaRefusal,
   MediaSession,
   MusicEqStatus,
+  UpdateStatus,
   WidgetSettings
 } from '../../../shared/types'
 
@@ -24,6 +25,7 @@ export interface WidgetState {
   eq: EqSettings
   eqStatus: EqStatus
   musicEq: MusicEqStatus
+  update: UpdateStatus
   /** The latest command a player turned down. */
   refusal: MediaRefusal | null
   /** False while the widget is hidden from the tray. */
@@ -47,6 +49,7 @@ export function initStore(initial: InitialState): void {
     eq: initial.eq,
     eqStatus: initial.eqStatus,
     musicEq: initial.musicEq,
+    update: initial.update,
     refusal: null,
     visible: true
   }
@@ -88,7 +91,8 @@ export function connectStore(): () => void {
     api.onDirection((direction) => setState({ direction })),
     api.onSettings((settings) => setState({ settings })),
     api.eq.onStatus((eqStatus) => setState({ eqStatus })),
-    api.musicEq.onStatus((musicEq) => setState({ musicEq }))
+    api.musicEq.onStatus((musicEq) => setState({ musicEq })),
+    api.update.onStatus((update) => setState({ update }))
   ]
   return () => offs.forEach((off) => off())
 }

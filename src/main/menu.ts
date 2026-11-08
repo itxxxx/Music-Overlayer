@@ -1,6 +1,6 @@
 import { Menu, type MenuItemConstructorOptions } from 'electron'
 import { classifyPlayer, isPlayerAllowed, type PlayerFilter } from '../shared/apps'
-import { APP_CREDIT, APP_NAME, type EqStatus, type WidgetSettings } from '../shared/types'
+import { APP_CREDIT, APP_NAME, type EqStatus, type UpdateStatus, type WidgetSettings } from '../shared/types'
 
 export interface MenuContext {
   visible: boolean
@@ -10,6 +10,11 @@ export interface MenuContext {
   /** Players seen since the app started. */
   seenApps: string[]
   isWindows: boolean
+  /** e.g. "Using 1.2% CPU and 180 MB of memory": everything the overlay runs, together. */
+  usage: string | null
+  update: UpdateStatus
+  checkForUpdates(): void
+  installUpdate(): void
   canStartAtLogin: boolean
   startAtLogin: boolean
   toggleVisible(): void
@@ -54,11 +59,34 @@ function playersMenu(ctx: MenuContext): MenuItemConstructorOptions[] {
   return items
 }
 
+function updateItem(ctx: MenuContext): MenuItemConstructorOptions {
+  const status = ctx.update
+  switch (status.state) {
+    case 'unsupported':
+      return { label: 'Updates: only in the installed app', enabled: false }
+    case 'checking':
+      return { label: 'Checking for updates…', enabled: false }
+    case 'latest':
+      return { label: `Check for updates (${status.version} is the latest)`, click: () => ctx.checkForUpdates() }
+    case 'downloading':
+      return { label: `Downloading version ${status.version}… ${status.percent}%`, enabled: false }
+    case 'ready':
+      return { label: `Restart to update to ${status.version}`, click: () => ctx.installUpdate() }
+    case 'available':
+      return { label: `Download version ${status.version}…`, click: () => ctx.installUpdate() }
+    case 'error':
+      return { label: `${status.message}. Try again`, click: () => ctx.checkForUpdates() }
+    default:
+      return { label: 'Check for updates', click: () => ctx.checkForUpdates() }
+  }
+}
+
 /** Used for both the tray icon and right-clicking the widget. */
 export function buildMenu(ctx: MenuContext): Menu {
   const { settings, eqStatus } = ctx
   const template: MenuItemConstructorOptions[] = [
     { label: `${APP_NAME}, ${APP_CREDIT}`, enabled: false },
+    ...(ctx.usage ? [{ label: ctx.usage, enabled: false }] : []),
     { type: 'separator' },
     { label: ctx.visible ? 'Hide overlay' : 'Show overlay', click: () => ctx.toggleVisible() },
     { label: 'Equalizer…', click: () => ctx.openEqualizer() },
@@ -129,6 +157,7 @@ export function buildMenu(ctx: MenuContext): Menu {
   template.push(
     { label: 'Reset position', click: () => ctx.resetPosition() },
     { type: 'separator' },
+    updateItem(ctx),
     { label: 'Restart Music Overlayer', click: () => ctx.restart() },
     { label: 'Quit Music Overlayer', click: () => ctx.quit() }
   )

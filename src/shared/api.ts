@@ -11,6 +11,7 @@ import type {
   MediaSession,
   MusicEqStatus,
   PipelineRequest,
+  UpdateStatus,
   WidgetCommand,
   WidgetSettings
 } from './types'
@@ -35,8 +36,13 @@ export interface WidgetApi {
   setInteractive(interactive: boolean): void
   /** The pointer moved over the widget (sent a few times a second at most). */
   pointerSeen(): void
-  /** Sent every few seconds, so the main process notices a page that hangs. */
-  alive(): void
+  /**
+   * Sent every few seconds, so the main process notices a page that hangs or stops drawing.
+   * `longestTaskMs` is the longest the page was busy without a break since the last check-in.
+   */
+  alive(painted: boolean, longestTaskMs: number): void
+  /** What the page is doing right now, for the log (see lib/diagnostics). */
+  reportStep(step: string): void
   setHitRect(rect: HitRect | null): void
   /** A button or slider is being held, so the window must keep mouse input. */
   setPointerActive(active: boolean): void
@@ -52,7 +58,7 @@ export interface WidgetApi {
   onVisibility(listener: (visible: boolean) => void): Unsubscribe
   /** Ask the main process to (re)start system-audio capture for the visualizer. */
   requestAudioCapture(): void
-  /** System-audio capture gave no sound; the main process tries its other way once. */
+  /** System-audio capture gave no sound (for the log). */
   reportNoSystemAudio(): void
 
   eq: {
@@ -63,6 +69,13 @@ export interface WidgetApi {
     refreshStatus(): Promise<EqStatus>
     openDownloadPage(): void
     onStatus(listener: (status: EqStatus) => void): Unsubscribe
+  }
+
+  /** The app's own updates. */
+  update: {
+    onStatus(listener: (status: UpdateStatus) => void): Unsubscribe
+    /** Restart into the downloaded version, or (portable app) open the download page. */
+    install(): void
   }
 
   /** The music-only equalizer (VB-CABLE). */

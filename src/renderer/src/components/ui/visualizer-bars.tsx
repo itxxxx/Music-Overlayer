@@ -24,6 +24,10 @@ interface VisualizerBarsProps {
   radiusBottom?: number
 }
 
+/** How fast a bar follows the music up and down, per 60 Hz frame. */
+const RISE = 0.55
+const FALL = 0.12
+
 /**
  * Bars drawn on a canvas straight from the audio frame loop: no React re-renders, no style or
  * layout work per frame, and nothing at all once the bars have settled.
@@ -100,11 +104,17 @@ export function VisualizerBars({
     if (active) {
       const edges = bandEdges(count, minHz, maxHz)
       const target = new Float32Array(count)
-      unsubscribe = audioLevels.subscribe((spectrum) => {
+      let last = 0
+      unsubscribe = audioLevels.subscribe((spectrum, now) => {
         readBands(spectrum, edges, target)
+        // Rise and fall rates are per 60 Hz frame; scaled by the time since the last frame, the
+        // bars move the same at any frame rate.
+        const frames = last ? Math.min(4, Math.max(0.25, (now - last) / (1000 / 60))) : 1
+        last = now
+        const rise = 1 - Math.pow(1 - RISE, frames)
+        const fall = 1 - Math.pow(1 - FALL, frames)
         for (let i = 0; i < count; i++) {
-          const rate = target[i] > levels[i] ? 0.55 : 0.12
-          levels[i] += (target[i] - levels[i]) * rate
+          levels[i] += (target[i] - levels[i]) * (target[i] > levels[i] ? rise : fall)
         }
         draw()
       })

@@ -32,7 +32,7 @@
     {"t":"fatal","message":"..."}                   the script then exits with code 3
 
     {"t":"apps","ids":["Spotify.exe","Discord"]}    every app with a session, shown or not
-    {"t":"alive"}                                   after 5 s without any other output
+    {"t":"usage","cpuMs":1234,"memKb":45678}        every 5 s: this process's CPU time so far and private memory
 
   Input: one command per line on stdin
     toggle | play | pause | next | prev | stop | seek <ms> | shuffle <0|1> | repeat <0|1|2>
@@ -62,10 +62,20 @@ $script:writer = New-Object -TypeName System.IO.StreamWriter -ArgumentList @([Co
 $script:writer.AutoFlush = $true
 $script:reader = New-Object -TypeName System.IO.StreamReader -ArgumentList @([Console]::OpenStandardInput(), $utf8)
 
-$script:lastSentAt = [DateTime]::UtcNow
 function Send-Line([string]$Line) {
   $script:writer.WriteLine($Line)
-  $script:lastSentAt = [DateTime]::UtcNow
+}
+
+$script:lastUsageAt = [DateTime]::MinValue
+function Send-Usage {
+  $script:lastUsageAt = [DateTime]::UtcNow
+  try {
+    $self = [System.Diagnostics.Process]::GetCurrentProcess()
+    $self.Refresh()
+    Send-Json ([ordered]@{ t = 'usage'; cpuMs = [long]$self.TotalProcessorTime.TotalMilliseconds; memKb = [long]($self.PrivateMemorySize64 / 1024) })
+  } catch {
+    Send-Json ([ordered]@{ t = 'usage' })
+  }
 }
 
 function Send-Json($Object) {
@@ -207,6 +217,8 @@ if (-not $Diagnose) {
 $script:manager = $null
 $script:selected = $null   # session currently shown in the widget
 $script:shownId = $null    # its app id
+$script:shownSession = $null  # the session shown last (kept while a browser is between songs)
+$script:shownTitle = ''       # its title: tabs of one browser share an app id, titles tell them apart
 $script:shownStatus = -1   # its playback status (4 = playing)
 $script:pinnedId = $null   # app id picked by hand with "cycle"
 $script:allowPattern = ''  # only apps matching this are shown ('' = all)
@@ -309,6 +321,37 @@ function Find-Session($List, [string]$AppId) {
   return $null
 }
 
+function Get-Title($Session) {
+  try {
+    $props = Wait-WinRT ($Session.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties]) 1500
+    if ($null -ne $props) { return [string]$props.Title }
+  } catch { }
+  return ''
+}
+
+# The shown session in $List. Tabs of one browser share an app id (two Opera tabs are both
+# "Opera"), so it's the same session object if Windows hands that back, else the one of the same
+# app with the same title. With $Strict, a lone session of that app with another title counts as
+# another tab, not as the shown one.
+function Find-Shown($List, [bool]$Strict) {
+  $id = [string]$script:shownId
+  if (-not $id) { return $null }
+  $same = New-Object -TypeName System.Collections.ArrayList
+  foreach ($session in $List) {
+    if ((Get-AppId $session) -eq $id) { [void]$same.Add($session) }
+  }
+  if ($same.Count -eq 0) { return $null }
+  foreach ($session in $same) {
+    if ([object]::ReferenceEquals($session, $script:shownSession)) { return $session }
+  }
+  if ($same.Count -eq 1 -and -not $Strict) { return $same[0] }
+  foreach ($session in $same) {
+    if ((Get-Title $session) -eq $script:shownTitle) { return $session }
+  }
+  if ($Strict) { return $null }
+  return $same[0]
+}
+
 function Get-Time([hashtable]$Map, [string]$AppId) {
   if ($AppId -and $Map.ContainsKey($AppId)) { return [DateTime]$Map[$AppId] }
   return [DateTime]::MinValue
@@ -353,7 +396,12 @@ function Select-Session($List) {
 
   $shownId = [string]$script:shownId
   if ($shownId) {
-    if ($nowPlaying.ContainsKey($shownId)) { return (Find-Session $playing $shownId) }
+    $shown = Find-Shown $List $true
+    if ($null -ne $shown -and (Get-Status $shown) -eq 4) {
+      # Picked by hand and now playing: the usual rules apply again.
+      if ($shownId -eq $script:pinnedId) { $script:pinnedId = $null }
+      return $shown
+    }
     $playedAt = Get-Time $script:lastPlayed $shownId
     # A second of slack: a player started just before this one was paused still counts.
     $since = $playedAt
@@ -361,7 +409,12 @@ function Select-Session($List) {
     if ($shownId -eq $script:pinnedId -and $script:pinnedAt -gt $since) { $since = $script:pinnedAt }
     $started = Get-StartedAfter $playing $since $shownId
     if ($null -ne $started) { return $started }
-    $shown = Find-Session $List $shownId
+    # Another tab of the same browser plays: show that tab, unless this one was picked by hand.
+    if ($nowPlaying.ContainsKey($shownId) -and $shownId -ne $script:pinnedId) {
+      foreach ($session in $playing) {
+        if ((Get-AppId $session) -eq $shownId -and -not [object]::ReferenceEquals($session, $shown)) { return $session }
+      }
+    }
     if ($null -ne $shown) { return $shown }
     # Gone right after playing: most likely between two songs.
     if ((Test-Allowed $shownId) -and ($now - $playedAt).TotalMilliseconds -le $script:holdMs) {
@@ -402,16 +455,28 @@ function Select-Session($List) {
   return $List[0]
 }
 
+# Shows the next session (by hand). Goes session by session, so two tabs of one browser can
+# be picked too.
 function Switch-Session {
   $list = Get-AllSessions
   if ($list.Count -lt 2) { return }
-  $ids = @()
-  foreach ($session in $list) { $ids += (Get-AppId $session) }
-  $index = [Array]::IndexOf($ids, [string]$script:shownId)
-  $nextId = $ids[($index + 1) % $ids.Count]
-  $script:pinnedId = $nextId
+  # Where the shown session is: same app and title, else just the same app.
+  $titles = @()
+  foreach ($session in $list) { $titles += (Get-Title $session) }
+  $index = -1
+  for ($i = 0; $i -lt $list.Count -and $index -lt 0; $i++) {
+    if ((Get-AppId $list[$i]) -eq $script:shownId -and $titles[$i] -eq $script:shownTitle) { $index = $i }
+  }
+  for ($i = 0; $i -lt $list.Count -and $index -lt 0; $i++) {
+    if ((Get-AppId $list[$i]) -eq $script:shownId) { $index = $i }
+  }
+  $nextIndex = ($index + 1) % $list.Count
+  $next = $list[$nextIndex]
+  $script:shownId = Get-AppId $next
+  $script:shownSession = $next
+  $script:shownTitle = $titles[$nextIndex]
+  $script:pinnedId = $script:shownId
   $script:pinnedAt = [DateTime]::UtcNow
-  $script:shownId = $nextId
   $script:lastStateJson = ''
 }
 
@@ -628,6 +693,8 @@ function Update-Sessions {
   $script:selected = $session
   if ($null -eq $session) {
     $script:shownId = $null
+    $script:shownSession = $null
+    $script:shownTitle = ''
     $script:shownStatus = -1
     Publish-State $null 0
     return
@@ -635,7 +702,9 @@ function Update-Sessions {
   $id = Get-AppId $session
   if ($id -ne $script:pinnedId) { $script:pinnedId = $null }
   $script:shownId = $id
+  $script:shownSession = $session
   $result = Read-SessionState $session
+  $script:shownTitle = [string]$result.State.title
   $script:shownStatus = [int]$result.State.st
   Publish-State $result.State $list.Count
   Update-Cover $result.Props $result.Key
@@ -902,8 +971,9 @@ while ($true) {
     }
   }
   try { Update-Routes } catch { Send-Error "Couldn't check routed players: $($_.Exception.Message)" }
-  # The widget restarts a bridge that goes quiet for too long, so say we're still here.
-  if (([DateTime]::UtcNow - $script:lastSentAt).TotalSeconds -ge 5) { Send-Json ([ordered]@{ t = 'alive' }) }
+  # Every 5 s: this process's own CPU and memory, for the overlay's usage total. It also tells
+  # the widget the bridge is alive (it restarts a bridge that goes quiet for too long).
+  if (([DateTime]::UtcNow - $script:lastUsageAt).TotalSeconds -ge 5) { Send-Usage }
 
   # Read often while music plays; when it doesn't, nothing moves, so read less.
   $interval = $IdlePollMs

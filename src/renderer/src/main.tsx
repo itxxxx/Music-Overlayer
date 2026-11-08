@@ -4,6 +4,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { audioLevels } from './lib/audio-levels'
+import { step, takeLongestTask } from './lib/diagnostics'
 import { MusicEqPipeline } from './lib/music-eq'
 import { connectStore, getState, initStore, subscribeState } from './lib/store'
 
@@ -21,11 +22,21 @@ audioLevels.setLiveEndedHandler(() => {
 })
 // The capture is let go during long pauses; music playing again brings it back.
 audioLevels.setWantLiveHandler(() => window.musicWidget.requestAudioCapture())
-// No sound from the capture: the main process has another way to try (once).
+// No sound from the capture (it shows simulated bars then); noted in the log.
 audioLevels.setNoAudioHandler(() => window.musicWidget.reportNoSystemAudio())
-// Check in regularly: if this page ever hangs, the main process reloads it.
-window.musicWidget.alive()
-window.setInterval(() => window.musicWidget.alive(), 2000)
+// Check in regularly, saying whether a frame was drawn since the last time: if this page ever
+// hangs or stops drawing, the main process reloads it. One frame per check costs nothing.
+step('page', 'started')
+let painted = true
+const checkIn = (): void => {
+  window.musicWidget.alive(painted, takeLongestTask())
+  painted = false
+  requestAnimationFrame(() => {
+    painted = true
+  })
+}
+checkIn()
+window.setInterval(checkIn, 2000)
 // Hidden from the tray: stop listening. Showing it again starts the capture from the main process.
 window.musicWidget.onVisibility((visible) => {
   if (!visible) audioLevels.stopLive()
@@ -46,9 +57,11 @@ function connectMusicEq(inputName: string | undefined): void {
   // For tests: the audio path as it stands.
   ;(window as unknown as { __musicWidgetPipeline: () => object }).__musicWidgetPipeline = () => ({
     running: pipeline.running,
-    boost: pipeline.boostLevel
+    boost: pipeline.boostLevel,
+    limiter: pipeline.limiterInPath
   })
   api.onPipeline((request) => {
+    step('music path', request.run ? `asked to run (equalize ${request.equalize})` : 'asked to stop')
     if (!request.run) {
       wanted = false
       pipeline.stop()
@@ -65,9 +78,11 @@ function connectMusicEq(inputName: string | undefined): void {
       .then(() => {
         if (!wanted || !pipeline.running) return
         audioLevels.attach(pipeline.analyser)
+        step('music path', 'running')
         api.reportPipeline({ running: true })
       })
       .catch((error: unknown) => {
+        step('music path', `failed: ${error instanceof Error ? error.message : String(error)}`)
         pipeline.stop()
         audioLevels.attach(null)
         api.reportPipeline({ running: false, error: error instanceof Error ? error.message : String(error) })
@@ -84,6 +99,7 @@ function connectMusicEq(inputName: string | undefined): void {
 }
 
 void window.musicWidget.getInitialState().then((initial) => {
+  step('page', 'got its state')
   initStore(initial)
   connectStore()
   connectMusicEq(initial.testCableInput)
@@ -92,4 +108,6 @@ void window.musicWidget.getInitialState().then((initial) => {
       <App />
     </StrictMode>
   )
+  step('page', 'rendering')
+  requestAnimationFrame(() => step('page', 'drew its first frame'))
 })

@@ -3,7 +3,7 @@ import type { PlayerFilter } from '../../shared/apps'
 import type { BridgeStatus, MediaCommand, MediaCover, MediaSession } from '../../shared/types'
 import { ArtworkLookup } from './artwork-lookup'
 import { DemoMediaSource } from './demo-source'
-import type { MediaSource, MediaSourceEvents } from './media-source'
+import type { HelperUsage, MediaSource, MediaSourceEvents } from './media-source'
 import { WindowsMediaBridge } from './windows-bridge'
 
 export type MediaMode = 'windows' | 'demo'
@@ -35,6 +35,11 @@ export class MediaHub extends EventEmitter<MediaSourceEvents> {
     super()
     this.filter = options.filter
     this.onlineCovers = options.onlineCovers
+  }
+
+  /** CPU and memory of the media reader's own process (PowerShell on Windows), if any. */
+  get helperUsage(): HelperUsage | null {
+    return this.source?.helperUsage ?? null
   }
 
   use(mode: MediaMode): void {

@@ -12,7 +12,7 @@ Open **PowerShell** and run:
 irm https://raw.githubusercontent.com/itxxxx/Music-Overlayer/main/install.ps1 | iex
 ```
 
-This installs Music Overlayer for your account (no admin needed), offers to set up the equalizer and starts the app. Run the same command again to update.
+This installs Music Overlayer for your account (no admin needed), offers to set up the equalizer and starts the app. From version 1.2.0 on it updates itself (see [Updates](#updates)); running the same command again also updates it.
 
 To uninstall, go to Windows Settings → Apps → Installed apps → Music Overlayer.
 
@@ -23,6 +23,8 @@ Music Overlayer needs 64-bit Windows 10 or 11.
 - **Volume up to 200%.** The volume slider now goes past 100% to boost quiet songs and quiet players. It uses the same one-time VB-CABLE setup as the music-only equalizer. See [Volume above 100%](#volume-above-100).
 - **Stays on your browser between songs.** When SoundCloud, YouTube Music or another tab moves on to the next song, the overlay stays on it instead of jumping back to Spotify. It only switches when you start another player.
 - **Fixes itself if it gets stuck.** If the overlay ever stops responding, or can't be dragged or clicked, it now recovers on its own. There's also a new **Restart Music Overlayer** in the tray menu.
+- **Lighter.** The open card uses much less CPU while music plays, and the tray menu shows how much CPU and memory the overlay uses in total.
+- **Updates itself.** New versions download in the background; click **Restart to update** at the bottom of the card or in the tray menu. Coming from 1.1, run the install command once more to get 1.2.0, and it updates itself from then on.
 
 ## What's new in 1.1.0
 
@@ -52,6 +54,8 @@ To update, run the install command again.
 | Switch player | Click the player name on the cover. It only works when more than one player is open. |
 | Move the overlay | Drag it. The position is remembered. |
 | Settings, hide, quit | Right-click the overlay, or use the tray icon |
+| Update | When a new version is ready, click **Restart to update** at the bottom of the card. The tray menu also has **Check for updates**. |
+| See how much CPU and memory it uses | Open the tray menu: the line under the name is the total for everything Music Overlayer runs |
 
 ## Music only
 
@@ -98,6 +102,14 @@ Drag the volume slider past the notch in the middle, or scroll up over it, to ma
 - Near 100% the slider snaps to 100%, which turns the boost off.
 - When Music Overlayer is closed, or the music stays paused for 20 seconds, the player plays at its normal volume again. The boost comes back when it plays.
 
+## Updates
+
+Music Overlayer checks for a new version a little after it starts, then every few hours. When there is one, it downloads it in the background, and the bottom of the card shows **Restart to update to …**. Click it, or use the same item in the tray menu, and the overlay restarts on the new version within a few seconds. If you don't, the update installs the next time you quit Music Overlayer.
+
+To check right away, use tray → **Check for updates**.
+
+The portable version can't replace itself. When a new version is out, the card shows **Get version …**, which opens the download page.
+
 ## Troubleshooting
 
 **The overlay is stuck: it can't be dragged and the buttons do nothing.**
@@ -113,7 +125,7 @@ The message under it gives the reason. It usually means a security policy or ant
 Tray → **Players** lists every app that reported media. Tick it there. In Firefox, also check that `media.hardwaremediakeys.enabled` is `true` in `about:config`.
 
 **The timeline is greyed out, or shuffle and repeat are missing.**
-That player doesn't let other apps use them. Browsers and Apple Music don't offer shuffle or repeat to other apps, so the card leaves those buttons out.
+That player doesn't let other apps use them. Browsers and Apple Music don't offer shuffle or repeat to other apps, so the card leaves those buttons out. SoundCloud and YouTube Music have them on their own page, but a browser can't pass them on to Windows.
 
 **There's no cover art.**
 Some players don't share their artwork with Windows. Tray → **Find missing covers online** looks it up by title and artist on Apple's iTunes Search. It's off until you turn it on.
@@ -126,6 +138,9 @@ If Music Overlayer was closed unexpectedly while the equalizer worked, the playe
 
 **There's no volume slider.**
 The slider only shows when the player appears in the Windows volume mixer. Play something in it and it shows up.
+
+**Task Manager lists Music Overlayer several times.**
+Like every app built on Chromium, it runs as a few small processes, and Windows only groups them under one entry for apps with a taskbar button. The overlay deliberately has none. The tray menu shows the total for all of them, including its PowerShell helper (listed as "Windows PowerShell").
 
 **The volume slider stops at 100%.**
 Going higher needs VB-CABLE. Open the equalizer and click **Set up**, then restart Windows. Hover over the slider to see what's missing.

@@ -177,6 +177,21 @@ export interface PipelineRequest {
   boost: number
 }
 
+/** Where the app's own updates stand (see src/main/updater.ts). */
+export type UpdateStatus =
+  /** Running from source: nothing to update. */
+  | { state: 'unsupported' }
+  | { state: 'idle' }
+  | { state: 'checking'; manual: boolean }
+  /** A check asked for from the menu found nothing newer. */
+  | { state: 'latest'; version: string }
+  | { state: 'downloading'; version: string; percent: number }
+  /** Downloaded: "Restart to update" installs it. */
+  | { state: 'ready'; version: string }
+  /** The portable app: a newer version is out, to download from the releases page. */
+  | { state: 'available'; version: string }
+  | { state: 'error'; message: string }
+
 export type WidgetCommand = 'open-eq' | 'expand'
 
 export interface InitialState {
@@ -185,6 +200,7 @@ export interface InitialState {
   eq: EqSettings
   eqStatus: EqStatus
   musicEq: MusicEqStatus
+  update: UpdateStatus
   /** Only for tests: the recording device that stands in for VB-CABLE's "CABLE Output". */
   testCableInput?: string
   direction: ExpandDirection

@@ -1,6 +1,7 @@
 import { EQ_BANDS, EQ_Q, effectivePreampDb } from '../../../shared/eq'
 import type { EqSettings } from '../../../shared/types'
 import { FFT_SIZE } from '@/lib/audio-levels'
+import { step } from '@/lib/diagnostics'
 
 /**
  * The music-only equalizer's audio path. The main process sends the music app to VB-CABLE's
@@ -41,10 +42,17 @@ export class MusicEqPipeline {
   private stream: MediaStream | null = null
   private preamp: GainNode | null = null
   private filters: BiquadFilterNode[] = []
-  /** At 100% the sound skips the limiter entirely; above, it goes through it. */
+  /**
+   * At 100% the sound skips the limiter entirely (it isn't even connected, so it costs no CPU);
+   * above, it goes through it.
+   */
   private direct: GainNode | null = null
   private boostIn: GainNode | null = null
   private boostOut: GainNode | null = null
+  /** The last filter, which feeds both paths. */
+  private tail: AudioNode | null = null
+  private limiterConnected = false
+  private disconnectTimer = 0
   private equalize = true
   private boost = 1
   private starting: Promise<void> | null = null
@@ -90,6 +98,9 @@ export class MusicEqPipeline {
     this.direct = null
     this.boostIn = null
     this.boostOut = null
+    this.tail = null
+    this.limiterConnected = false
+    window.clearTimeout(this.disconnectTimer)
     this.analyser = null
     stream?.getTracks().forEach((track) => track.stop())
     void context?.close().catch(() => undefined)
@@ -111,19 +122,38 @@ export class MusicEqPipeline {
 
   private applyBoost(): void {
     const context = this.context
-    if (!context || !this.direct || !this.boostIn || !this.boostOut) return
+    const { direct, boostIn, boostOut, tail } = this
+    if (!context || !direct || !boostIn || !boostOut || !tail) return
     const now = context.currentTime
     const boosted = this.boost > 1.001
-    this.direct.gain.setTargetAtTime(boosted ? 0 : 1, now, GLIDE_S)
-    this.boostOut.gain.setTargetAtTime(boosted ? 1 : 0, now, GLIDE_S)
+    window.clearTimeout(this.disconnectTimer)
+    if (boosted && !this.limiterConnected) {
+      tail.connect(boostIn)
+      this.limiterConnected = true
+    }
+    direct.gain.setTargetAtTime(boosted ? 0 : 1, now, GLIDE_S)
+    boostOut.gain.setTargetAtTime(boosted ? 1 : 0, now, GLIDE_S)
     // Halved to fit the limiter's curve, which doubles it back.
-    this.boostIn.gain.setTargetAtTime(this.boost / 2, now, GLIDE_S)
+    boostIn.gain.setTargetAtTime(this.boost / 2, now, GLIDE_S)
+    if (!boosted && this.limiterConnected) {
+      // Once the crossfade back has finished, take the limiter out of the path.
+      this.disconnectTimer = window.setTimeout(() => {
+        if (this.tail !== tail || this.boost > 1.001 || !this.limiterConnected) return
+        tail.disconnect(boostIn)
+        this.limiterConnected = false
+      }, GLIDE_S * 1000 * 8)
+    }
   }
 
   private async open(eq: EqSettings): Promise<void> {
+    step('music path', 'looking for CABLE Output')
     const input = await findCableOutput(this.inputName)
-    const context = new AudioContext({ latencyHint: 'interactive' })
+    step('music path', 'creating its audio context')
+    // 'balanced': audio in slightly bigger chunks, so the audio thread wakes up half as often.
+    // It adds about 10 ms to the music's small delay, which nobody hears.
+    const context = new AudioContext({ latencyHint: 'balanced' })
     let stream: MediaStream | null = null
+    step('music path', 'opening CABLE Output')
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -152,6 +182,7 @@ export class MusicEqPipeline {
       return
     }
 
+    step('music path', 'building the equalizer and limiter')
     const source = context.createMediaStreamSource(stream)
     const preamp = context.createGain()
     const filters = EQ_BANDS.map((frequency) => {
@@ -185,7 +216,6 @@ export class MusicEqPipeline {
       node = filter
     }
     node.connect(direct)
-    node.connect(boostIn)
     boostIn.connect(limiter)
     limiter.connect(boostOut)
     direct.connect(analyser)
@@ -206,6 +236,8 @@ export class MusicEqPipeline {
     this.direct = direct
     this.boostIn = boostIn
     this.boostOut = boostOut
+    this.tail = node
+    this.limiterConnected = false
     this.analyser = analyser
     this.apply(eq)
     this.applyBoost()
@@ -214,6 +246,11 @@ export class MusicEqPipeline {
   /** For tests: what the boost stage is set to. */
   get boostLevel(): number {
     return this.boost
+  }
+
+  /** For tests: whether the limiter is in the audio path. */
+  get limiterInPath(): boolean {
+    return this.limiterConnected
   }
 }
 

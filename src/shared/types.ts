@@ -38,6 +38,11 @@ export interface MediaSession {
    */
   volume: number | null
   muted: boolean | null
+  /**
+   * The overlay's own boost on top of `volume`, 1–2 (2 is 200%). Above 1 the player's sound goes
+   * through VB-CABLE so the overlay can turn it up. Set by the main process, not the player.
+   */
+  boost?: number
 }
 
 export interface MediaCover {
@@ -85,6 +90,8 @@ export interface HitRect {
   y: number
   width: number
   height: number
+  /** The page's own width, to catch a page whose pixels aren't the window's. */
+  viewWidth?: number
 }
 
 export interface WidgetSettings {
@@ -156,7 +163,18 @@ export interface MusicEqStatus {
   restartPending: boolean
   /** The player being equalized right now (its name), or null. */
   active: string | null
+  /** Volume can go above 100% (VB-CABLE is there and Windows lets the overlay route players). */
+  boostAvailable: boolean
   error: string | null
+}
+
+/** What the main process asks of the window's audio path (VB-CABLE in, speakers out). */
+export interface PipelineRequest {
+  run: boolean
+  /** Apply the equalizer (music-only mode with the equalizer on); otherwise stay flat. */
+  equalize: boolean
+  /** Gain on top, 1–2, with a limiter so it can't clip. */
+  boost: number
 }
 
 export type WidgetCommand = 'open-eq' | 'expand'

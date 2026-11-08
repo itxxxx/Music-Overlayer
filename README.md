@@ -18,6 +18,12 @@ To uninstall, go to Windows Settings → Apps → Installed apps → Music Overl
 
 Music Overlayer needs 64-bit Windows 10 or 11.
 
+## What's new in 1.2.0
+
+- **Volume up to 200%.** The volume slider now goes past 100% to boost quiet songs and quiet players. It uses the same one-time VB-CABLE setup as the music-only equalizer. See [Volume above 100%](#volume-above-100).
+- **Stays on your browser between songs.** When SoundCloud, YouTube Music or another tab moves on to the next song, the overlay stays on it instead of jumping back to Spotify. It only switches when you start another player.
+- **Fixes itself if it gets stuck.** If the overlay ever stops responding, or can't be dragged or clicked, it now recovers on its own. There's also a new **Restart Music Overlayer** in the tray menu.
+
 ## What's new in 1.1.0
 
 - **Music-only equalizer.** The equalizer can now change just the player the overlay shows. Discord, games and everything else sound exactly as before. It's the new default, and the old behaviour is still there as **Everything**. See [The equalizer](#the-equalizer).
@@ -32,7 +38,8 @@ To update, run the install command again.
 
 - **Pill:** shows the artwork, title, artist and live bars. After 4 seconds on its own it fades to 75% opacity.
 - **Card:** move the pointer over the pill and it comes back to full opacity. Rest there for 0.3 s and it opens into the card, with the cover art, a timeline you can drag to seek, previous/play-pause/next, and shuffle/repeat when the player supports them. Shuffle and repeat light up when they're on; repeat one shows a small 1.
-- **Volume:** the slider under the controls changes the player's own volume, not your whole PC's. It's the same level as the player's slider in the Windows volume mixer. For a browser tab it changes the whole browser, because Windows has no volume per tab.
+- **Volume:** the slider under the controls changes the player's own volume, not your whole PC's. Up to 100% it's the same level as the player's slider in the Windows volume mixer; past 100% it boosts the player, up to 200%. For a browser tab it changes the whole browser, because Windows has no volume per tab.
+- **Which player:** the overlay follows the player you started last, and stays on it through pauses and song changes until you start another one. To pick another player yourself, click the player name on the cover.
 - **Equalizer:** 10 bands, presets, your own saved presets and a preamp. By default it changes only the music player the overlay shows. Open it with the sliders button on the cover.
 - **Colours:** the overlay picks its colours from the current album art.
 - **Always on top:** it stays above other windows without taking focus. Clicks pass through everywhere except the overlay itself.
@@ -41,8 +48,8 @@ To update, run the install command again.
 | --- | --- |
 | Open the card | Rest the pointer on the pill for 0.3 s, or click it |
 | Seek | Click or drag the timeline |
-| Change the player's volume | Drag the volume slider, or scroll over it. Click the speaker to mute. |
-| Switch player | Click the player name on the cover. It only works when more than one music app is playing. |
+| Change the player's volume | Drag the volume slider, or scroll over it. Past the notch in the middle it boosts the player up to 200%. Click the speaker to mute. |
+| Switch player | Click the player name on the cover. It only works when more than one player is open. |
 | Move the overlay | Drag it. The position is remembered. |
 | Settings, hide, quit | Right-click the overlay, or use the tray icon |
 
@@ -80,7 +87,24 @@ Some things to know:
 
 Use the switch at the top of the equalizer panel to turn the equalizer off.
 
+## Volume above 100%
+
+Drag the volume slider past the notch in the middle, or scroll up over it, to make the player louder than its own maximum, up to 200%. The part of the slider above 100% turns orange.
+
+- It needs VB-CABLE, set up once from the equalizer panel (see [The equalizer](#the-equalizer)). Without it, the slider stops at 100%. It works with the equalizer in either mode, or switched off.
+- Each player keeps its own boost, and it's remembered next time.
+- A limiter keeps the loudest parts from crackling. At 200%, very loud songs can sound a little squashed.
+- For a browser tab the whole browser is boosted, because Windows treats the browser as one app.
+- Near 100% the slider snaps to 100%, which turns the boost off.
+- When Music Overlayer is closed, or the music stays paused for 20 seconds, the player plays at its normal volume again. The boost comes back when it plays.
+
 ## Troubleshooting
+
+**The overlay is stuck: it can't be dragged and the buttons do nothing.**
+It should recover by itself, within a minute at most. If it doesn't, use tray → **Restart Music Overlayer**. If it keeps happening, the log at `%APPDATA%\Music Overlayer\logs\main.log` shows what went on; attach it when you report the problem.
+
+**The overlay switches to another player by itself.**
+It switches when another player starts playing. Click the player name on the cover to go back; it then stays on that player until you start a different one.
 
 **The overlay says "Can't read Windows media right now".**
 The message under it gives the reason. It usually means a security policy or antivirus on this PC is blocking PowerShell scripts.
@@ -102,6 +126,9 @@ If Music Overlayer was closed unexpectedly while the equalizer worked, the playe
 
 **There's no volume slider.**
 The slider only shows when the player appears in the Windows volume mixer. Play something in it and it shows up.
+
+**The volume slider stops at 100%.**
+Going higher needs VB-CABLE. Open the equalizer and click **Set up**, then restart Windows. Hover over the slider to see what's missing.
 
 **The equalizer does nothing.**
 - Restart Windows after setup.

@@ -10,6 +10,7 @@ import type {
   MediaRefusal,
   MediaSession,
   MusicEqStatus,
+  PipelineRequest,
   WidgetCommand,
   WidgetSettings
 } from './types'
@@ -27,9 +28,15 @@ export interface WidgetApi {
   /** The player turned a command down (shuffle, repeat, volume...). */
   onMediaRefused(listener: (refusal: MediaRefusal) => void): Unsubscribe
   sendMediaCommand(command: MediaCommand): void
+  /** Turn a player up past 100% (1–2), on top of its own volume. */
+  setBoost(appId: string, boost: number): void
 
   /** Let the window take mouse input (true) or pass clicks through to apps below (false). */
   setInteractive(interactive: boolean): void
+  /** The pointer moved over the widget (sent a few times a second at most). */
+  pointerSeen(): void
+  /** Sent every few seconds, so the main process notices a page that hangs. */
+  alive(): void
   setHitRect(rect: HitRect | null): void
   /** A button or slider is being held, so the window must keep mouse input. */
   setPointerActive(active: boolean): void
@@ -45,6 +52,8 @@ export interface WidgetApi {
   onVisibility(listener: (visible: boolean) => void): Unsubscribe
   /** Ask the main process to (re)start system-audio capture for the visualizer. */
   requestAudioCapture(): void
+  /** System-audio capture gave no sound; the main process tries its other way once. */
+  reportNoSystemAudio(): void
 
   eq: {
     apply(settings: EqSettings): Promise<EqStatus>
@@ -64,8 +73,8 @@ export interface WidgetApi {
     recheck(): void
     openDownloadPage(): void
     onStatus(listener: (status: MusicEqStatus) => void): Unsubscribe
-    /** The main process asks the window to start (true) or stop its audio path. */
-    onPipeline(listener: (run: boolean) => void): Unsubscribe
+    /** The main process asks the window to start, change or stop its audio path. */
+    onPipeline(listener: (request: PipelineRequest) => void): Unsubscribe
     reportPipeline(state: { running: boolean; error?: string }): void
   }
 }

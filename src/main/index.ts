@@ -10,16 +10,17 @@ import {
   type IpcMainEvent,
   type IpcMainInvokeEvent
 } from 'electron'
-import { sanitizeEq } from '../shared/eq'
+import { clamp, sanitizeEq } from '../shared/eq'
 import { togglePlayer, type PlayerFilter } from '../shared/apps'
 import { APP_NAME, type EqStatus, type InitialState, type MediaCommand, type MediaSession, type WidgetSettings } from '../shared/types'
 import { DOWNLOAD_URL, EqualizerApo } from './eq/equalizer-apo'
 import { MusicEqController } from './eq/music-eq'
 import { CABLE_PAGE } from './eq/virtual-cable'
 import { MediaHub, type MediaMode } from './media/media-hub'
+import { log } from './log'
 import { buildMenu, type MenuContext } from './menu'
 import { resourcePath } from './paths'
-import { SettingsStore } from './settings'
+import { MAX_BOOST, SettingsStore, sanitizeBoosts } from './settings'
 import { WidgetWindow } from './widget-window'
 
 const isWindows = process.platform === 'win32'
@@ -32,6 +33,12 @@ if (isWindows) {
   // straight away. Skipping Windows Graphics Capture keeps Windows from drawing a capture border.
   app.commandLine.appendSwitch('disable-features', 'AllowWgcScreenCapturer,AllowWgcWindowCapturer')
 }
+
+/** How long the screen list may take before the visualizer goes without system audio. */
+const SCREEN_LIST_TIMEOUT_MS = 5000
+/** At most this many automatic reloads of a crashed or hung overlay in RELOAD_WINDOW_MS. */
+const MAX_RELOADS = 3
+const RELOAD_WINDOW_MS = 120_000
 
 const COMMAND_TYPES = new Set(['toggle', 'play', 'pause', 'next', 'prev', 'cycle-session', 'seek', 'shuffle', 'repeat', 'volume', 'mute'])
 
@@ -56,6 +63,7 @@ async function main(): Promise<void> {
   await app.whenReady()
   if (isWindows) app.setAppUserModelId('com.itx.musicoverlayer')
   Menu.setApplicationMenu(null)
+  log('app', `${APP_NAME} ${app.getVersion()} starting (Electron ${process.versions.electron}, ${process.platform} ${process.getSystemVersion()})`)
 
   const settings = new SettingsStore(app.getPath('userData'))
   await settings.load()
@@ -66,7 +74,8 @@ async function main(): Promise<void> {
     onDirectionChange: (direction) => widget.send('widget:direction', direction),
     onVisibilityChange: (visible) => {
       if (visible) startAudioCapture()
-    }
+    },
+    onPageHung: () => recoverPage("The overlay's page stopped responding")
   })
   const media = new MediaHub({ filter: settings.get().players, onlineCovers: settings.get().widget.onlineCovers })
   let tray: Tray | null = null
@@ -93,12 +102,17 @@ async function main(): Promise<void> {
     isWindows: isWindows || process.env.MUSIC_OVERLAYER_FAKE_CABLE === '1',
     media,
     getEq: () => settings.get().eq,
+    getBoost: (appId) => settings.get().boosts[appId] ?? 1,
     getRoutedApps: () => settings.get().routedApps,
     setRoutedApps: (routedApps) => settings.update({ routedApps }),
     getCableInstalledAt: () => settings.get().cableInstalledAt,
     setCableInstalledAt: (cableInstalledAt) => settings.update({ cableInstalledAt }),
-    onStatus: (status) => widget.send('music-eq:status', status),
-    setPipeline: (run) => widget.send('music-eq:pipeline', run),
+    onStatus: (status) => {
+      widget.send('music-eq:status', status)
+      // Whether a boost applies depends on VB-CABLE being there.
+      widget.send('media:session', withBoost(media.session))
+    },
+    setPipeline: (request) => widget.send('music-eq:pipeline', request),
     setDeviceBypass: (reason) => void apo.setBypass(reason)
   })
 
@@ -106,10 +120,49 @@ async function main(): Promise<void> {
   musicEq.update()
   eqStatus = await refreshEq()
 
+  /** The session as the window sees it: with the overlay's own boost, when one can apply. */
+  function withBoost(current: MediaSession | null): MediaSession | null {
+    if (!current) return null
+    const boost = musicEq.current.boostAvailable ? (settings.get().boosts[current.appId] ?? 1) : 1
+    return { ...current, boost }
+  }
+
   const mediaMode = (): MediaMode => (settings.get().widget.demo || !isWindows || forceDemo ? 'demo' : 'windows')
   const canStartAtLogin = isWindows && app.isPackaged
   const isOwnSender = (event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
     Boolean(widget.win && !widget.win.isDestroyed() && event.sender === widget.win.webContents)
+
+  /** Reload a page that crashed or hangs, so the overlay never stays stuck. */
+  let reloads: number[] = []
+  let reloading = false
+  let reloadStartedAt = 0
+  function recoverPage(reason: string): void {
+    const contents = widget.win?.webContents
+    if (!contents || contents.isDestroyed()) return
+    const now = Date.now()
+    if (reloading && now - reloadStartedAt < 20_000) return
+    reloads = reloads.filter((at) => now - at < RELOAD_WINDOW_MS)
+    if (reloads.length >= MAX_RELOADS) {
+      log('widget', `${reason}; already reloaded ${reloads.length} times, leaving it`)
+      return
+    }
+    reloads.push(now)
+    reloading = true
+    reloadStartedAt = now
+    log('widget', `${reason}; reloading it`)
+    musicEq.windowGone()
+    widget.pageReset()
+    if (contents.isCrashed()) {
+      contents.reload()
+      return
+    }
+    // A hung page: end its process first. Reloading right away would go to the dying process
+    // and leave no page at all, so the reload waits for 'render-process-gone' (or this timer).
+    contents.forcefullyCrashRenderer()
+    setTimeout(() => {
+      if (reloading && !contents.isDestroyed() && contents.isCrashed()) contents.reload()
+    }, 3000)
+  }
 
   function startAudioCapture(): void {
     // Hidden, the widget doesn't listen at all; it starts again when it's shown.
@@ -171,6 +224,14 @@ async function main(): Promise<void> {
       void apo.disconnect()
     },
     resetPosition: () => widget.resetPosition(),
+    restart: () => {
+      log('app', 'restart from the menu')
+      // The portable build runs from a temporary copy; start the portable file itself again.
+      const portable = process.env.PORTABLE_EXECUTABLE_FILE
+      app.releaseSingleInstanceLock()
+      app.relaunch(portable ? { execPath: portable, args: [] } : undefined)
+      app.quit()
+    },
     quit: () => app.quit()
   })
 
@@ -179,15 +240,35 @@ async function main(): Promise<void> {
   }
 
   // System audio for the visualizer: answer the page's getDisplayMedia() with loopback audio.
+  // The video it also has to return is the page itself, which costs nothing and doesn't involve
+  // the screen; it's dropped straight away. Should that ever come back without sound, the
+  // screen is used instead (listing screens can be slow, so it's given a time limit).
+  let loopbackViaScreen = false
   if (isWindows) {
-    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      let answered = false
+      const answer = (streams: Parameters<typeof callback>[0]): void => {
+        if (answered) return
+        answered = true
+        try {
+          callback(streams)
+        } catch (error) {
+          log('audio', `capture answer refused: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (request.frame && !loopbackViaScreen) {
+        answer({ video: request.frame, audio: 'loopback' })
+        return
+      }
+      const timer = setTimeout(() => {
+        log('audio', 'listing screens took too long')
+        answer({})
+      }, SCREEN_LIST_TIMEOUT_MS)
       desktopCapturer
         .getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } })
-        .then((sources) => {
-          if (sources[0]) callback({ video: sources[0], audio: 'loopback' })
-          else callback({})
-        })
-        .catch(() => callback({}))
+        .then((sources) => answer(sources[0] ? { video: sources[0], audio: 'loopback' } : {}))
+        .catch(() => answer({}))
+        .finally(() => clearTimeout(timer))
     })
   }
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
@@ -201,7 +282,7 @@ async function main(): Promise<void> {
   })
 
   media.on('session', (current) => {
-    widget.send('media:session', current)
+    widget.send('media:session', withBoost(current))
     tray?.setToolTip(trayTooltip(current))
   })
   media.on('cover', (cover) => widget.send('media:cover', cover))
@@ -220,14 +301,31 @@ async function main(): Promise<void> {
       musicEq: musicEq.current,
       testCableInput: process.env.MUSIC_OVERLAYER_FAKE_CABLE_INPUT || undefined,
       direction: widget.direction,
-      media: { session: media.session, cover: media.cover, status: media.status }
+      media: { session: withBoost(media.session), cover: media.cover, status: media.status }
     }
   })
   ipcMain.on('media:command', (event, command: unknown) => {
     if (isOwnSender(event) && isMediaCommand(command)) media.command(command)
   })
+  ipcMain.on('media:boost', (event, appId: unknown, value: unknown) => {
+    if (!isOwnSender(event) || typeof appId !== 'string' || !appId || appId.length >= 400) return
+    if (typeof value !== 'number' || !Number.isFinite(value)) return
+    const boost = clamp(Math.round(value * 100) / 100, 1, MAX_BOOST)
+    const boosts = { ...settings.get().boosts }
+    delete boosts[appId]
+    if (boost > 1) boosts[appId] = boost
+    settings.update({ boosts: sanitizeBoosts(boosts) })
+    musicEq.update()
+    if (media.session?.appId === appId) widget.send('media:session', withBoost(media.session))
+  })
   ipcMain.on('widget:interactive', (event, interactive: unknown) => {
-    if (isOwnSender(event)) widget.setInteractive(interactive === true)
+    if (isOwnSender(event)) widget.setPageHover(interactive === true)
+  })
+  ipcMain.on('widget:pointer-seen', (event) => {
+    if (isOwnSender(event)) widget.pageSawPointer()
+  })
+  ipcMain.on('widget:alive', (event) => {
+    if (isOwnSender(event)) widget.pageAlive()
   })
   ipcMain.on('widget:hit-rect', (event, rect: unknown) => {
     if (isOwnSender(event)) widget.setHitRect(rect as never)
@@ -273,6 +371,12 @@ async function main(): Promise<void> {
   ipcMain.on('audio:start', (event) => {
     if (isOwnSender(event)) startAudioCapture()
   })
+  ipcMain.on('audio:no-system-audio', (event) => {
+    if (!isOwnSender(event) || loopbackViaScreen || !isWindows) return
+    log('audio', 'no system audio through the page capture; using the screen capture instead')
+    loopbackViaScreen = true
+    setTimeout(startAudioCapture, 500)
+  })
   ipcMain.handle('music-eq:install', async (event) => {
     if (!isOwnSender(event)) return musicEq.current
     return musicEq.install()
@@ -291,12 +395,30 @@ async function main(): Promise<void> {
 
   const win = widget.create(!settings.get().hidden)
   win.webContents.on('did-finish-load', () => {
+    reloading = false
+    // The widget's hit-testing assumes page pixels are window pixels.
+    win.webContents.setZoomFactor(1)
+    void win.webContents.setVisualZoomLevelLimits(1, 1).catch(() => undefined)
     startAudioCapture()
     // A reloaded window has no audio path yet; ask again if the music-only equalizer needs it.
-    if (musicEq.pipelineRequested) widget.send('music-eq:pipeline', true)
+    musicEq.pageLoaded()
   })
-  // If the window dies, nothing carries VB-CABLE to the speakers: send the music back directly.
-  win.webContents.on('render-process-gone', () => musicEq.windowGone())
+  win.webContents.on('render-process-gone', (_event, details) => {
+    // If the window dies, nothing carries VB-CABLE to the speakers: send the music back directly.
+    musicEq.windowGone()
+    if (details.reason === 'clean-exit') return
+    if (reloading) {
+      // The hung page's process is gone (recoverPage ended it): load a fresh one.
+      setTimeout(() => {
+        if (!win.webContents.isDestroyed()) win.webContents.reload()
+      }, 200)
+      return
+    }
+    recoverPage(`The overlay's page went away (${details.reason}, exit code ${details.exitCode})`)
+  })
+  // The page's own check-ins decide whether it hangs (see onPageHung); this is just for the log.
+  win.on('unresponsive', () => log('widget', 'Chromium reports the page as unresponsive'))
+  win.on('responsive', () => log('widget', 'the page is responsive again'))
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event) => event.preventDefault())
 

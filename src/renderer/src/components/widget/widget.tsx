@@ -25,6 +25,10 @@ const REFUSAL_NOTICE_MS = 3500
 /** Bars per second while the pill sits faded; full rate whenever it's looked at. */
 const IDLE_FPS = 30
 const ACTIVE_FPS = 60
+/** Pointer moves over the widget are reported at most this often (see WidgetWindow). */
+const POINTER_SEEN_MS = 250
+/** The widget's position is re-checked this often, in case something moved it without a resize. */
+const HIT_RECT_CHECK_MS = 2000
 
 function refusalText(refusal: MediaRefusal, appName: string): string {
   const player = appName || 'The player'
@@ -81,6 +85,9 @@ export function Widget() {
   const viewRef = useRef<View>('player')
   const draggingRef = useRef(false)
   const pressRef = useRef<{ x: number; y: number; id: number } | null>(null)
+  const pointerSeenAt = useRef(0)
+  const pointerSeenTimer = useRef(0)
+  useEffect(() => () => window.clearTimeout(pointerSeenTimer.current), [])
   const settingsRef = useRef(settings)
   settingsRef.current = settings
 
@@ -175,7 +182,23 @@ export function Widget() {
   }, [scheduleIdle])
 
   // Pointer enter/leave detected by the main process (backstop for click-through windows).
-  useEffect(() => api.onPointer((event) => (event === 'enter' ? handleEnter() : handleLeave())), [api, handleEnter, handleLeave])
+  useEffect(
+    () =>
+      api.onPointer((event) => {
+        if (event === 'enter') {
+          handleEnter()
+          return
+        }
+        // The main process thinks the pointer left, but it's still right here: keep the mouse,
+        // or the widget couldn't be clicked or dragged until the pointer went away and back.
+        if (shellRef.current?.matches(':hover')) {
+          api.setInteractive(true)
+          return
+        }
+        handleLeave()
+      }),
+    [api, handleEnter, handleLeave]
+  )
 
   // Commands from the tray menu.
   useEffect(
@@ -213,24 +236,35 @@ export function Widget() {
     const element = shellRef.current
     if (!element) return
     let frame = 0
-    const report = () => {
+    let last = ''
+    const report = (force: boolean) => {
       frame = 0
       const rect = element.getBoundingClientRect()
-      api.setHitRect({
+      const next = {
         x: Math.round(rect.left),
         y: Math.round(rect.top),
         width: Math.round(rect.width),
-        height: Math.round(rect.height)
-      })
+        height: Math.round(rect.height),
+        viewWidth: window.innerWidth
+      }
+      const key = JSON.stringify(next)
+      if (!force && key === last) return
+      last = key
+      api.setHitRect(next)
     }
     const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(report)
+      if (!frame) frame = requestAnimationFrame(() => report(true))
     }
     const observer = new ResizeObserver(schedule)
     observer.observe(element)
+    window.addEventListener('resize', schedule)
+    // Size changes are seen straight away; this catches a move without one (a resized window).
+    const check = window.setInterval(() => report(false), HIT_RECT_CHECK_MS)
     schedule()
     return () => {
       observer.disconnect()
+      window.removeEventListener('resize', schedule)
+      window.clearInterval(check)
       cancelAnimationFrame(frame)
     }
   }, [api, direction])
@@ -245,22 +279,27 @@ export function Widget() {
     return () => observer.disconnect()
   }, [])
 
-  // Any held button or slider keeps mouse input on the window until it's released.
+  const endDrag = useCallback(() => {
+    pressRef.current = null
+    if (!draggingRef.current) return
+    draggingRef.current = false
+    api.endDrag()
+  }, [api])
+
+  // Any held button or slider keeps mouse input on the window until it's released, and a
+  // release anywhere ends a drag (even one whose pointer capture went missing).
   useEffect(() => {
-    const release = () => api.setPointerActive(false)
+    const release = () => {
+      api.setPointerActive(false)
+      if (draggingRef.current) endDrag()
+    }
     window.addEventListener('pointerup', release)
     window.addEventListener('pointercancel', release)
     return () => {
       window.removeEventListener('pointerup', release)
       window.removeEventListener('pointercancel', release)
     }
-  }, [api])
-
-  const endDrag = () => {
-    if (!draggingRef.current) return
-    draggingRef.current = false
-    api.endDrag()
-  }
+  }, [api, endDrag])
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
@@ -270,6 +309,17 @@ export function Widget() {
   }
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // Proof the pointer is on the widget: tell the main process now and then (always including
+    // where it came to rest), and pick the hover back up if it was dropped by mistake.
+    const wait = pointerSeenAt.current + POINTER_SEEN_MS - performance.now()
+    window.clearTimeout(pointerSeenTimer.current)
+    const report = () => {
+      pointerSeenAt.current = performance.now()
+      api.pointerSeen()
+    }
+    if (wait <= 0) report()
+    else pointerSeenTimer.current = window.setTimeout(report, wait)
+    if (!hoveredRef.current && !draggingRef.current) handleEnter()
     const press = pressRef.current
     if (!press || press.id !== event.pointerId || draggingRef.current) return
     if (Math.hypot(event.screenX - press.x, event.screenY - press.y) < DRAG_THRESHOLD_PX) return
@@ -304,6 +354,9 @@ export function Widget() {
   const visualizerOn = settings.visualizer
   const isBrowser = session ? classifyPlayer(session.appId).kind === 'browser' : false
   const volumeLabel = session?.appName ? `${session.appName} volume${isBrowser ? ' (the whole browser)' : ''}` : 'Volume'
+  const musicEq = useWidget((state) => state.musicEq)
+  const volumeHint =
+    musicEq.supported && !musicEq.boostAvailable ? 'To go up to 200%, set up VB-CABLE in the equalizer (Music only).' : null
 
   const anchorStyle =
     direction === 'down'
@@ -447,8 +500,10 @@ export function Widget() {
                     shuffle={playback.shuffle}
                     repeat={playback.repeat}
                     volume={empty ? null : playback.volume}
+                    volumeMax={playback.maxVolume}
                     muted={playback.muted}
                     volumeLabel={volumeLabel}
+                    volumeHint={volumeHint}
                     visualizerActive={expanded && visualizerOn && playback.playing}
                     showVisualizer={!empty}
                     notice={bridgeProblem ? (bridge.message ?? null) : notice}

@@ -21,6 +21,11 @@ audioLevels.setLiveEndedHandler(() => {
 })
 // The capture is let go during long pauses; music playing again brings it back.
 audioLevels.setWantLiveHandler(() => window.musicWidget.requestAudioCapture())
+// No sound from the capture: the main process has another way to try (once).
+audioLevels.setNoAudioHandler(() => window.musicWidget.reportNoSystemAudio())
+// Check in regularly: if this page ever hangs, the main process reloads it.
+window.musicWidget.alive()
+window.setInterval(() => window.musicWidget.alive(), 2000)
 // Hidden from the tray: stop listening. Showing it again starts the capture from the main process.
 window.musicWidget.onVisibility((visible) => {
   if (!visible) audioLevels.stopLive()
@@ -38,16 +43,25 @@ function connectMusicEq(inputName: string | undefined): void {
     audioLevels.attach(null)
     api.reportPipeline({ running: false, error: message })
   }
-  api.onPipeline((run) => {
-    wanted = run
-    if (!run) {
+  // For tests: the audio path as it stands.
+  ;(window as unknown as { __musicWidgetPipeline: () => object }).__musicWidgetPipeline = () => ({
+    running: pipeline.running,
+    boost: pipeline.boostLevel
+  })
+  api.onPipeline((request) => {
+    if (!request.run) {
+      wanted = false
       pipeline.stop()
       audioLevels.attach(null)
       api.reportPipeline({ running: false })
       return
     }
-    pipeline
-      .start(getState().eq)
+    // Already running: only the equalizer switch or the boost changed.
+    const alreadyAsked = wanted && pipeline.running
+    wanted = true
+    const starting = pipeline.start(getState().eq, request.equalize, request.boost)
+    if (alreadyAsked) return
+    starting
       .then(() => {
         if (!wanted || !pipeline.running) return
         audioLevels.attach(pipeline.analyser)

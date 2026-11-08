@@ -18,8 +18,11 @@ const api: WidgetApi = {
   onBridgeStatus: (listener) => subscribe('media:status', listener),
   onMediaRefused: (listener) => subscribe('media:refused', listener),
   sendMediaCommand: (command) => ipcRenderer.send('media:command', command),
+  setBoost: (appId, boost) => ipcRenderer.send('media:boost', appId, boost),
 
   setInteractive: (interactive) => ipcRenderer.send('widget:interactive', interactive),
+  pointerSeen: () => ipcRenderer.send('widget:pointer-seen'),
+  alive: () => ipcRenderer.send('widget:alive'),
   setHitRect: (rect) => ipcRenderer.send('widget:hit-rect', rect),
   setPointerActive: (active) => ipcRenderer.send('widget:pointer-active', active),
   startDrag: () => ipcRenderer.send('widget:drag-start'),
@@ -31,6 +34,7 @@ const api: WidgetApi = {
   onSettings: (listener) => subscribe('settings:changed', listener),
   onVisibility: (listener) => subscribe('widget:visibility', listener),
   requestAudioCapture: () => ipcRenderer.send('audio:start'),
+  reportNoSystemAudio: () => ipcRenderer.send('audio:no-system-audio'),
 
   eq: {
     apply: (settings) => ipcRenderer.invoke('eq:apply', settings),

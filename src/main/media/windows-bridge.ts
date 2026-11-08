@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { appDisplayName, playerPatterns, type PlayerFilter } from '../../shared/apps'
 import type { MediaCommand, MediaSession, PlaybackStatus, RepeatMode } from '../../shared/types'
+import { log } from '../log'
 import { resourcePath, systemExecutable } from '../paths'
 import { MediaSource, type CableInfo, type RouteResult } from './media-source'
 
@@ -41,6 +42,7 @@ type BridgeMessage =
   | { t: 'error'; message: string }
   | { t: 'fatal'; message: string }
   | { t: 'apps'; ids: string[] }
+  | { t: 'alive' }
 
 /** The filter as the bridge expects it: base64 of {"allow": regex, "block": regex}. */
 export function encodeFilter(filter: PlayerFilter): string {
@@ -84,6 +86,12 @@ export function toMediaSession(raw: RawSession, count: number, receivedAt: numbe
   }
 }
 
+/** A bridge that hasn't said "ready" by then is stuck (it normally takes a few seconds). */
+const READY_TIMEOUT_MS = 45_000
+/** The bridge says something at least every 5 s; this much silence means it hangs. */
+const SILENCE_TIMEOUT_MS = 40_000
+const WATCHDOG_MS = 5000
+
 /** Bridge command names that the UI cares about when a player turns them down. */
 const REFUSABLE = new Set<MediaCommand['type']>(['shuffle', 'repeat', 'volume', 'mute'])
 
@@ -123,6 +131,10 @@ export class WindowsMediaBridge extends MediaSource {
   private timelineStartMs = 0
   private filter: PlayerFilter
   private lastCoverWhy = ''
+  private launchedAt = 0
+  private lastLineAt = 0
+  private ready = false
+  private watchdog: NodeJS.Timeout | null = null
 
   constructor(filter: PlayerFilter) {
     super()
@@ -173,6 +185,8 @@ export class WindowsMediaBridge extends MediaSource {
     this.running = false
     if (this.restartTimer) clearTimeout(this.restartTimer)
     this.restartTimer = null
+    if (this.watchdog) clearInterval(this.watchdog)
+    this.watchdog = null
     const child = this.child
     this.child = null
     if (!child) return
@@ -222,6 +236,11 @@ export class WindowsMediaBridge extends MediaSource {
       return
     }
     this.child = child
+    this.launchedAt = Date.now()
+    this.lastLineAt = this.launchedAt
+    this.ready = false
+    this.startWatchdog()
+    log('bridge', `started (pid ${child.pid ?? '?'})`)
     let stderr = ''
     let fatal: string | null = null
 
@@ -234,6 +253,9 @@ export class WindowsMediaBridge extends MediaSource {
     createInterface({ input: child.stdout }).on('line', (line) => {
       const message = this.parse(line)
       if (message?.t === 'fatal') fatal = message.message
+      // A bridge the watchdog gave up on may still print a few lines on its way out.
+      if (this.child !== child) return
+      this.lastLineAt = Date.now()
       if (message) this.handle(message)
     })
     child.on('error', (error) => {
@@ -245,6 +267,7 @@ export class WindowsMediaBridge extends MediaSource {
       if (this.child !== child) return
       this.child = null
       if (!this.running) return
+      log('bridge', `exited with code ${code}${stderr ? `: ${stderr.trim().split(/\r?\n/).slice(-3).join(' ')}` : ''}`)
       if (fatal || code === 3) {
         // Media controls aren't available on this PC; try again much later.
         this.scheduleRestart(fatal ?? 'Windows media controls are not available.', 60_000, 'unsupported')
@@ -268,14 +291,16 @@ export class WindowsMediaBridge extends MediaSource {
   private handle(message: BridgeMessage): void {
     switch (message.t) {
       case 'hello':
-        console.info(`[media-bridge] Windows PowerShell ${message.ps} on Windows ${message.os}`)
+        log('bridge', `Windows PowerShell ${message.ps} on Windows ${message.os}`)
         break
       case 'native':
-        if (message.ok) console.info(`[media-bridge] native helper loaded (${message.from ?? '?'}, ${message.ms ?? '?'} ms)`)
-        else console.warn('[media-bridge] no per-app volume:', message.message)
+        if (message.ok) log('bridge', `native helper loaded (${message.from ?? '?'}, ${message.ms ?? '?'} ms)`)
+        else log('bridge', `no native helper: ${message.message ?? ''}`)
         break
       case 'ready':
+        this.ready = true
         this.restartDelayMs = 1000
+        log('bridge', `ready after ${Date.now() - this.launchedAt} ms`)
         this.emit('status', { state: 'ready' })
         break
       case 'state':
@@ -301,7 +326,7 @@ export class WindowsMediaBridge extends MediaSource {
       case 'cable': {
         const cable: CableInfo = { id: typeof message.id === 'string' && message.id ? message.id : null, routing: message.routing === true }
         if (message.why) cable.why = message.why
-        if (!cable.routing && message.why) console.info('[media-bridge] no per-app routing:', message.why)
+        log('bridge', `VB-CABLE ${cable.id ? 'found' : 'not found'}, per-app routing ${cable.routing ? 'available' : `unavailable${message.why ? `: ${message.why}` : ''}`}`)
         this.emit('cable', cable)
         break
       }
@@ -310,12 +335,12 @@ export class WindowsMediaBridge extends MediaSource {
         const result: RouteResult = { app: String(message.app ?? ''), n: Number(message.n) || 0 }
         if (message.why) result.why = String(message.why)
         if (message.exited) result.exited = true
-        if (message.t === 'routed' && result.n === 0) console.info('[media-bridge] could not route', result.app, result.why ?? '')
+        log('bridge', `${message.t} ${result.app}: ${result.n} process(es)${result.why ? `, ${result.why}` : ''}${result.exited ? ' (it quit)' : ''}`)
         this.emit(message.t, result)
         break
       }
       case 'error':
-        console.warn('[media-bridge]', message.message)
+        log('bridge', `error: ${message.message}`)
         break
       case 'fatal':
         this.emit('status', { state: 'unsupported', message: message.message })
@@ -330,6 +355,33 @@ export class WindowsMediaBridge extends MediaSource {
         if (Array.isArray(message.ids)) this.emit('apps', message.ids.filter((id) => typeof id === 'string'))
         break
     }
+  }
+
+  /**
+   * A bridge can hang without exiting: a player that stops answering Windows' media calls, or
+   * Windows' media service not being ready right after sign-in. Without this, the widget would
+   * say "Looking for players…" forever. Kill it and start a new one.
+   */
+  private startWatchdog(): void {
+    if (this.watchdog) return
+    this.watchdog = setInterval(() => {
+      const child = this.child
+      if (!child || !this.running) return
+      const now = Date.now()
+      let reason: string | null = null
+      if (!this.ready && now - this.launchedAt > READY_TIMEOUT_MS) reason = "The media bridge didn't start in time."
+      else if (now - this.lastLineAt > SILENCE_TIMEOUT_MS) reason = 'The media bridge stopped answering.'
+      if (!reason) return
+      log('bridge', `${reason} Restarting it.`)
+      this.child = null
+      try {
+        child.kill()
+      } catch {
+        // already gone
+      }
+      this.scheduleRestart(reason, 500)
+    }, WATCHDOG_MS)
+    this.watchdog.unref()
   }
 
   private scheduleRestart(reason: string, delayMs?: number, state: 'error' | 'unsupported' = 'error'): void {

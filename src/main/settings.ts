@@ -19,6 +19,8 @@ export interface StoredState {
   cableInstalledAt: number | null
   /** Players whose sound the widget sent to VB-CABLE and hasn't sent back yet (survives crashes). */
   routedApps: string[]
+  /** Volume boost per player (app id -> 1–2, where 2 is 200%). Players at 100% aren't listed. */
+  boosts: Record<string, number>
 }
 
 function defaults(): StoredState {
@@ -31,7 +33,8 @@ function defaults(): StoredState {
     apoUnlinked: false,
     apoInstalledAt: null,
     cableInstalledAt: null,
-    routedApps: []
+    routedApps: [],
+    boosts: {}
   }
 }
 
@@ -68,8 +71,24 @@ function sanitize(input: unknown): StoredState {
     cableInstalledAt: typeof raw.cableInstalledAt === 'number' && Number.isFinite(raw.cableInstalledAt) ? raw.cableInstalledAt : null,
     routedApps: Array.isArray(raw.routedApps)
       ? raw.routedApps.filter((app): app is string => typeof app === 'string' && app.length > 0 && app.length < 400).slice(0, 10)
-      : []
+      : [],
+    boosts: sanitizeBoosts(raw.boosts)
   }
+}
+
+export const MAX_BOOST = 2
+const MAX_BOOSTED_APPS = 30
+
+/** Keeps the boosts that are above 100%, for at most a few dozen players. */
+export function sanitizeBoosts(input: unknown): Record<string, number> {
+  const boosts: Record<string, number> = {}
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return boosts
+  for (const [app, value] of Object.entries(input).slice(-MAX_BOOSTED_APPS)) {
+    if (app.length === 0 || app.length >= 400 || typeof value !== 'number' || !Number.isFinite(value)) continue
+    const boost = clamp(Math.round(value * 100) / 100, 1, MAX_BOOST)
+    if (boost > 1) boosts[app] = boost
+  }
+  return boosts
 }
 
 /** Small JSON settings file in the user's app data folder. */

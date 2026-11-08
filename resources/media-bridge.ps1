@@ -32,6 +32,7 @@
     {"t":"fatal","message":"..."}                   the script then exits with code 3
 
     {"t":"apps","ids":["Spotify.exe","Discord"]}    every app with a session, shown or not
+    {"t":"alive"}                                   after 5 s without any other output
 
   Input: one command per line on stdin
     toggle | play | pause | next | prev | stop | seek <ms> | shuffle <0|1> | repeat <0|1|2>
@@ -61,8 +62,10 @@ $script:writer = New-Object -TypeName System.IO.StreamWriter -ArgumentList @([Co
 $script:writer.AutoFlush = $true
 $script:reader = New-Object -TypeName System.IO.StreamReader -ArgumentList @([Console]::OpenStandardInput(), $utf8)
 
+$script:lastSentAt = [DateTime]::UtcNow
 function Send-Line([string]$Line) {
   $script:writer.WriteLine($Line)
+  $script:lastSentAt = [DateTime]::UtcNow
 }
 
 function Send-Json($Object) {
@@ -210,6 +213,14 @@ $script:allowPattern = ''  # only apps matching this are shown ('' = all)
 $script:blockPattern = ''  # apps matching this are never shown
 $script:lastStateJson = ''
 $script:lastAppsJson = ''
+$script:pinnedAt = [DateTime]::MinValue    # when it was picked
+$script:startedAt = @{}    # app id -> when it last started playing
+$script:lastPlayed = @{}   # app id -> when it was last seen playing
+$script:wasPlaying = @{}   # app ids playing at the previous check
+$script:holding = $false   # set by Select-Session: keep showing what's shown
+# Browsers pause or drop their media session for a moment between songs. A player that was just
+# playing keeps being shown for this long while its session is gone.
+$script:holdMs = 15000
 
 function Set-Filter([string]$Encoded) {
   if (-not $Encoded) { return }
@@ -298,18 +309,68 @@ function Find-Session($List, [string]$AppId) {
   return $null
 }
 
-# Which player to show: one picked by hand, else whatever is playing (preferring the one already
-# shown, then the one Windows considers current), else the last one shown.
-function Select-Session($List) {
-  if ($List.Count -eq 0) {
-    $script:pinnedId = $null
-    return $null
+function Get-Time([hashtable]$Map, [string]$AppId) {
+  if ($AppId -and $Map.ContainsKey($AppId)) { return [DateTime]$Map[$AppId] }
+  return [DateTime]::MinValue
+}
+
+# The playing session whose player started most recently after $Since, other than $ExceptId.
+function Get-StartedAfter($Playing, [DateTime]$Since, [string]$ExceptId) {
+  $best = $null
+  $bestAt = $Since
+  foreach ($session in $Playing) {
+    $id = Get-AppId $session
+    if ($id -eq $ExceptId) { continue }
+    $at = Get-Time $script:startedAt $id
+    if ($at -gt $bestAt) {
+      $best = $session
+      $bestAt = $at
+    }
   }
+  return $best
+}
+
+# Which player to show. The shown player stays until a different player is started after it
+# stopped (or after it was picked by hand). Another app that was already playing doesn't take
+# over: Spotify can report "playing" while it plays on another device, and a browser pauses or
+# drops its session between two songs. With nothing shown, show what plays, preferring the
+# player Windows considers current.
+function Select-Session($List) {
+  $now = [DateTime]::UtcNow
+  $script:holding = $false
 
   $playing = New-Object -TypeName System.Collections.ArrayList
+  $nowPlaying = @{}
   foreach ($session in $List) {
-    if ((Get-Status $session) -eq 4) { [void]$playing.Add($session) }
+    if ((Get-Status $session) -ne 4) { continue }
+    $id = Get-AppId $session
+    [void]$playing.Add($session)
+    $nowPlaying[$id] = $true
+    if (-not $script:wasPlaying.ContainsKey($id)) { $script:startedAt[$id] = $now }
+    $script:lastPlayed[$id] = $now
   }
+  $script:wasPlaying = $nowPlaying
+
+  $shownId = [string]$script:shownId
+  if ($shownId) {
+    if ($nowPlaying.ContainsKey($shownId)) { return (Find-Session $playing $shownId) }
+    $playedAt = Get-Time $script:lastPlayed $shownId
+    # A second of slack: a player started just before this one was paused still counts.
+    $since = $playedAt
+    if ($since -gt [DateTime]::MinValue) { $since = $since.AddSeconds(-1) }
+    if ($shownId -eq $script:pinnedId -and $script:pinnedAt -gt $since) { $since = $script:pinnedAt }
+    $started = Get-StartedAfter $playing $since $shownId
+    if ($null -ne $started) { return $started }
+    $shown = Find-Session $List $shownId
+    if ($null -ne $shown) { return $shown }
+    # Gone right after playing: most likely between two songs.
+    if ((Test-Allowed $shownId) -and ($now - $playedAt).TotalMilliseconds -le $script:holdMs) {
+      $script:holding = $true
+      return $null
+    }
+  }
+
+  if ($List.Count -eq 0) { return $null }
 
   $currentId = $null
   try {
@@ -317,22 +378,25 @@ function Select-Session($List) {
     if ($null -ne $current) { $currentId = Get-AppId $current }
   } catch { }
 
-  if ($script:pinnedId) {
-    $pinned = Find-Session $List $script:pinnedId
-    if ($null -ne $pinned -and ((Get-Status $pinned) -eq 4 -or $playing.Count -eq 0)) { return $pinned }
-    $script:pinnedId = $null
-  }
-
   if ($playing.Count -gt 0) {
-    $match = Find-Session $playing $script:shownId
-    if ($null -ne $match) { return $match }
     $match = Find-Session $playing $currentId
+    if ($null -ne $match) { return $match }
+    $match = Get-StartedAfter $playing ([DateTime]::MinValue) ''
     if ($null -ne $match) { return $match }
     return $playing[0]
   }
 
-  $match = Find-Session $List $script:shownId
-  if ($null -ne $match) { return $match }
+  # Nothing plays: the player that played last, else the one Windows considers current.
+  $best = $null
+  $bestAt = [DateTime]::MinValue
+  foreach ($session in $List) {
+    $at = Get-Time $script:lastPlayed (Get-AppId $session)
+    if ($at -gt $bestAt) {
+      $best = $session
+      $bestAt = $at
+    }
+  }
+  if ($null -ne $best) { return $best }
   $match = Find-Session $List $currentId
   if ($null -ne $match) { return $match }
   return $List[0]
@@ -346,6 +410,7 @@ function Switch-Session {
   $index = [Array]::IndexOf($ids, [string]$script:shownId)
   $nextId = $ids[($index + 1) % $ids.Count]
   $script:pinnedId = $nextId
+  $script:pinnedAt = [DateTime]::UtcNow
   $script:shownId = $nextId
   $script:lastStateJson = ''
 }
@@ -554,6 +619,12 @@ function Update-Cover($Props, [string]$Key) {
 function Update-Sessions {
   $list = Get-AllSessions
   $session = Select-Session $list
+  if ($script:holding) {
+    # The shown player is between two songs: leave the widget as it is for now.
+    $script:selected = $null
+    return
+  }
+
   $script:selected = $session
   if ($null -eq $session) {
     $script:shownId = $null
@@ -561,7 +632,9 @@ function Update-Sessions {
     Publish-State $null 0
     return
   }
-  $script:shownId = Get-AppId $session
+  $id = Get-AppId $session
+  if ($id -ne $script:pinnedId) { $script:pinnedId = $null }
+  $script:shownId = $id
   $result = Read-SessionState $session
   $script:shownStatus = [int]$result.State.st
   Publish-State $result.State $list.Count
@@ -829,6 +902,8 @@ while ($true) {
     }
   }
   try { Update-Routes } catch { Send-Error "Couldn't check routed players: $($_.Exception.Message)" }
+  # The widget restarts a bridge that goes quiet for too long, so say we're still here.
+  if (([DateTime]::UtcNow - $script:lastSentAt).TotalSeconds -ge 5) { Send-Json ([ordered]@{ t = 'alive' }) }
 
   # Read often while music plays; when it doesn't, nothing moves, so read less.
   $interval = $IdlePollMs

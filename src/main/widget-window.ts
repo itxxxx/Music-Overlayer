@@ -1,6 +1,7 @@
-import { BrowserWindow, screen, type Rectangle } from 'electron'
+import { BrowserWindow, screen, type Point, type Rectangle } from 'electron'
 import path from 'node:path'
 import { APP_NAME, GEOMETRY, PILL_TOP, type ExpandDirection, type HitRect, type PillPosition } from '../shared/types'
+import { log } from './log'
 
 const EDGE_GAP = 8
 /** Cursor checks: often near the widget, rarely when the cursor is far away or the widget is hidden. */
@@ -10,12 +11,20 @@ const POLL_HIDDEN_MS = 500
 const NEAR_DISTANCE = 140
 const LEAVE_GRACE_MS = 250
 const POINTER_HOLD_LIMIT_MS = 15_000
+/** The page saw the pointer on the widget this recently: believe it over the cursor maths here. */
+const PAGE_SAW_POINTER_MS = 800
+/** A drag whose release was never seen ends by itself. */
+const DRAG_LIMIT_MS = 60_000
+/** The page checks in every 2 s while shown; this much silence means it hangs. */
+const PAGE_SILENCE_MS = 12_000
 
 interface WidgetWindowOptions {
   getPosition(): PillPosition | null
   savePosition(position: PillPosition): void
   onDirectionChange?(direction: ExpandDirection): void
   onVisibilityChange?(visible: boolean): void
+  /** The page stopped checking in while shown: it hangs and needs reloading. */
+  onPageHung?(): void
 }
 
 /**
@@ -30,9 +39,17 @@ export class WidgetWindow {
   direction: ExpandDirection = 'down'
   private hitRect: HitRect | null = null
   private interactive = false
+  /** What the page itself says: the pointer is on the widget. */
+  private pageHover = false
+  private pageSawPointerAt = 0
+  private cursorWhenPageSawIt: Point | null = null
+  private lastDisagreementLog = 0
+  private pageAliveAt = 0
+  private pageHungReported = false
   private pointerActive = false
   private pointerActiveSince = 0
   private dragging = false
+  private dragStartedAt = 0
   private dragOffset = { x: 0, y: 0 }
   private dragTimer: NodeJS.Timeout | null = null
   private pollTimer: NodeJS.Timeout | null = null
@@ -105,6 +122,7 @@ export class WidgetWindow {
 
   show(): void {
     if (!this.win || this.win.isDestroyed()) return
+    this.pageAlive()
     // Hidden, the page may sleep; shown, its animations and timers must run at full speed.
     this.win.webContents.setBackgroundThrottling(false)
     this.win.showInactive()
@@ -132,13 +150,49 @@ export class WidgetWindow {
     else this.win.setIgnoreMouseEvents(true, { forward: true })
   }
 
+  /** The page's own view of the pointer, from its mouseenter and mouseleave. */
+  setPageHover(hovered: boolean): void {
+    this.pageHover = hovered
+    if (hovered) this.pageSawPointer()
+    this.setInteractive(hovered)
+  }
+
+  /** The page saw the pointer move over the widget. */
+  pageSawPointer(): void {
+    this.pageSawPointerAt = Date.now()
+    this.cursorWhenPageSawIt = screen.getCursorScreenPoint()
+  }
+
+  /** The page checks in regularly; see PAGE_SILENCE_MS. */
+  pageAlive(): void {
+    this.pageAliveAt = Date.now()
+    this.pageHungReported = false
+  }
+
+  /** The page is about to be reloaded: forget what the old one said. */
+  pageReset(): void {
+    this.pageHover = false
+    this.hitRect = null
+    this.pointerActive = false
+    this.endDrag()
+    this.setInteractive(false)
+    this.pageAlive()
+  }
+
   setHitRect(rect: HitRect | null): void {
-    if (
-      rect &&
-      [rect.x, rect.y, rect.width, rect.height].every((value) => typeof value === 'number' && Number.isFinite(value))
-    ) {
-      this.hitRect = rect
-    } else this.hitRect = null
+    const valid = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+    if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(valid)) {
+      this.hitRect = null
+      return
+    }
+    // The page measures in its own pixels. Should they ever differ from the window's (a zoomed
+    // page, or a window Windows resized after a display change), scale them over.
+    let scale = 1
+    if (valid(rect.viewWidth) && rect.viewWidth > 0 && this.win && !this.win.isDestroyed()) {
+      const ratio = this.win.getBounds().width / rect.viewWidth
+      if (ratio > 0.25 && ratio < 4 && Math.abs(ratio - 1) > 0.01) scale = ratio
+    }
+    this.hitRect = { x: rect.x * scale, y: rect.y * scale, width: rect.width * scale, height: rect.height * scale }
   }
 
   setPointerActive(active: boolean): void {
@@ -152,9 +206,14 @@ export class WidgetWindow {
     const bounds = this.win.getBounds()
     this.dragOffset = { x: cursor.x - bounds.x, y: cursor.y - bounds.y }
     this.dragging = true
+    this.dragStartedAt = Date.now()
     if (this.dragTimer) clearInterval(this.dragTimer)
     this.dragTimer = setInterval(() => {
       if (!this.win || this.win.isDestroyed()) return
+      if (Date.now() - this.dragStartedAt > DRAG_LIMIT_MS) {
+        this.endDrag()
+        return
+      }
       const point = screen.getCursorScreenPoint()
       const x = point.x - this.dragOffset.x
       const y = point.y - this.dragOffset.y
@@ -288,6 +347,7 @@ export class WidgetWindow {
     const win = this.win
     const rect = this.hitRect
     if (!win || win.isDestroyed() || !win.isVisible()) return POLL_HIDDEN_MS
+    this.checkPageAlive()
     if (this.dragging || !rect) return POLL_NEAR_MS
     const point = screen.getCursorScreenPoint()
     const bounds = win.getBounds()
@@ -314,9 +374,37 @@ export class WidgetWindow {
     }
     if (!this.outsideSince) this.outsideSince = Date.now()
     else if (Date.now() - this.outsideSince > LEAVE_GRACE_MS) {
+      if (this.pageSeesPointer(point)) {
+        // The maths here say the pointer left, the page says it's still on the widget. Trust
+        // the page: taking the mouse away now would leave a widget that can't be clicked or
+        // dragged. (Seen with some multi-monitor and scaling setups.)
+        this.outsideSince = 0
+        if (Date.now() - this.lastDisagreementLog > 60_000) {
+          this.lastDisagreementLog = Date.now()
+          log('widget', `pointer at ${point.x},${point.y} looks outside the widget (${Math.round(left)},${Math.round(top)} ${Math.round(rect.width)}x${Math.round(rect.height)}) but the page still sees it`)
+        }
+        return POLL_NEAR_MS
+      }
       this.setInteractive(false)
       this.send('widget:pointer', 'leave')
     }
     return POLL_NEAR_MS
+  }
+
+  /** Whether the page has recently seen the pointer on the widget, and it hasn't moved since. */
+  private pageSeesPointer(point: Point): boolean {
+    if (!this.pageHover) return false
+    if (Date.now() - this.pageSawPointerAt < PAGE_SAW_POINTER_MS) return true
+    const seen = this.cursorWhenPageSawIt
+    return seen !== null && Math.abs(seen.x - point.x) <= 1 && Math.abs(seen.y - point.y) <= 1
+  }
+
+  private checkPageAlive(): void {
+    if (this.pageHungReported || !this.pageAliveAt) return
+    if (Date.now() - this.pageAliveAt < PAGE_SILENCE_MS) return
+    this.pageHungReported = true
+    this.pageHover = false
+    this.setInteractive(false)
+    this.options.onPageHung?.()
   }
 }

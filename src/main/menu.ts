@@ -22,6 +22,8 @@ export interface MenuContext {
   openApoEditor(): void
   unlinkApo(): void
   resetPosition(): void
+  /** Quits and starts again: the way out if the overlay ever gets stuck. */
+  restart(): void
   quit(): void
 }
 
@@ -127,6 +129,7 @@ export function buildMenu(ctx: MenuContext): Menu {
   template.push(
     { label: 'Reset position', click: () => ctx.resetPosition() },
     { type: 'separator' },
+    { label: 'Restart Music Overlayer', click: () => ctx.restart() },
     { label: 'Quit Music Overlayer', click: () => ctx.quit() }
   )
   return Menu.buildFromTemplate(template)

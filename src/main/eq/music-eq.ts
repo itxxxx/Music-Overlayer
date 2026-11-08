@@ -1,6 +1,7 @@
 import os from 'node:os'
 import { appDisplayName } from '../../shared/apps'
-import type { EqSettings, MusicEqStatus } from '../../shared/types'
+import type { EqSettings, MusicEqStatus, PipelineRequest } from '../../shared/types'
+import { log } from '../log'
 import type { MediaHub } from '../media/media-hub'
 import type { CableInfo, RouteResult } from '../media/media-source'
 import { installCable } from './virtual-cable'
@@ -22,22 +23,25 @@ interface MusicEqOptions {
   isWindows: boolean
   media: MediaHub
   getEq(): EqSettings
+  /** The player's volume boost, 1–2. */
+  getBoost(appId: string): number
   /** Apps this or an earlier run routed and hasn't undone yet (kept across crashes). */
   getRoutedApps(): string[]
   setRoutedApps(apps: string[]): void
   getCableInstalledAt(): number | null
   setCableInstalledAt(time: number | null): void
   onStatus(status: MusicEqStatus): void
-  /** Ask the window to start or stop its audio path (capture CABLE Output, equalize, play). */
-  setPipeline(run: boolean): void
+  /** Ask the window to start, change or stop its audio path (capture CABLE Output, equalize, play). */
+  setPipeline(request: PipelineRequest): void
   /** Keep Equalizer APO flat (a reason) or let it equalize the device (null). */
   setDeviceBypass(reason: string | null): void
 }
 
 /**
- * The music-only equalizer. While the shown player plays, its sound is sent to VB-CABLE; the
- * window captures the cable, equalizes it and plays it on the normal output. Discord, games and
- * everything else keep going straight to the speakers, untouched.
+ * The music-only equalizer, and the volume boost past 100%. While the shown player plays, its
+ * sound is sent to VB-CABLE; the window captures the cable, equalizes and/or boosts it and plays
+ * it on the normal output. Discord, games and everything else keep going straight to the
+ * speakers, untouched.
  *
  * Order matters: the window's audio path starts first, then the player is routed, so the music
  * never goes silent. Stopping goes the other way round.
@@ -54,7 +58,10 @@ export class MusicEqController {
   private routeError: string | null = null
   private retryAt = 0
   private pipelineRetryAt = 0
-  private lastPlayingAt = 0
+  /** The last request sent to the window, to send changes only. */
+  private request: PipelineRequest | null = null
+  /** When each player was last seen playing: the pause grace is per player. */
+  private playedAt = new Map<string, number>()
   private installing = false
   private installError: string | null = null
   private stopTimer: NodeJS.Timeout | null = null
@@ -87,9 +94,9 @@ export class MusicEqController {
     return this.status
   }
 
-  /** Whether the window's audio path should be running (for a window that just loaded). */
-  get pipelineRequested(): boolean {
-    return this.pipelineWanted
+  /** A window that just (re)loaded has no audio path: ask again if it should have one. */
+  pageLoaded(): void {
+    if (this.pipelineWanted && this.request?.run) this.options.setPipeline(this.request)
   }
 
   /** Re-evaluates everything. Cheap; called on every change. */
@@ -101,25 +108,31 @@ export class MusicEqController {
 
     const session = media.session
     const now = Date.now()
-    if (session?.status === 'playing') this.lastPlayingAt = now
+    const app = session?.appId || null
+    if (app && session?.status === 'playing') this.playedAt.set(app, now)
     if (this.pending && now - this.pending.at > ANSWER_TIMEOUT_MS) this.pending = null
 
     const cableId = this.cable.id
-    const app = session?.appId || null
+    const equalize = musicMode && eq.enabled
+    const boost = app ? this.options.getBoost(app) : 1
+    // Only the shown player's own pause counts: another player that was just playing doesn't
+    // keep this one on the cable.
+    const recent = app !== null && now - (this.playedAt.get(app) ?? 0) < PAUSE_GRACE_MS
     const wanted =
-      musicMode &&
-      eq.enabled &&
+      isWindows &&
+      (equalize || boost > 1) &&
       Boolean(cableId) &&
       this.cable.routing &&
       app !== null &&
-      (session?.status === 'playing' || now - this.lastPlayingAt < PAUSE_GRACE_MS)
+      (session?.status === 'playing' || recent)
 
     if (wanted && cableId && app) {
       this.cancelStop()
       if (!this.pipelineWanted && now >= this.pipelineRetryAt) {
         this.pipelineWanted = true
-        this.options.setPipeline(true)
+        this.request = null
       }
+      if (this.pipelineWanted) this.sendPipeline({ run: true, equalize, boost })
       if (this.pipelineRunning && !this.pending && this.routedApp !== app && now >= this.retryAt) {
         this.pending = { kind: 'route', at: now }
         media.route(cableId)
@@ -141,6 +154,7 @@ export class MusicEqController {
     if (running) this.pipelineError = null
     else {
       if (error) {
+        if (error !== this.pipelineError) log('music-eq', `audio path failed: ${error}`)
         this.pipelineError = error
         // Ask again later rather than in a loop.
         this.pipelineWanted = false
@@ -158,6 +172,7 @@ export class MusicEqController {
   /** The window went away (crash or reload): its audio path is gone. */
   windowGone(): void {
     this.pipelineWanted = false
+    this.request = null
     this.setPipelineState(false, null)
   }
 
@@ -252,9 +267,16 @@ export class MusicEqController {
       if (this.routedApp || !this.pipelineWanted) return
       this.pipelineWanted = false
       this.pipelineRunning = false
-      this.options.setPipeline(false)
+      this.sendPipeline({ run: false, equalize: false, boost: 1 })
       this.publish()
     }, STOP_DELAY_MS)
+  }
+
+  private sendPipeline(request: PipelineRequest): void {
+    const previous = this.request
+    if (previous && previous.run === request.run && previous.equalize === request.equalize && previous.boost === request.boost) return
+    this.request = request
+    this.options.setPipeline(request)
   }
 
   private cancelStop(): void {
@@ -275,14 +297,16 @@ export class MusicEqController {
     const installedAt = this.options.getCableInstalledAt()
     const bootedAt = Date.now() - os.uptime() * 1000
     const cable = Boolean(this.cable.id)
+    const supported = this.options.isWindows
     let error = this.installError ?? this.pipelineError ?? this.routeError
     if (!error && cable && !this.cable.routing) {
       error = this.cable.why ? `Windows won't let apps move another app's sound: ${this.cable.why}` : "Windows won't let apps move another app's sound."
     }
     return {
-      supported: this.options.isWindows,
+      supported,
       cable,
       routing: this.cable.routing,
+      boostAvailable: supported && cable && this.cable.routing,
       installing: this.installing,
       restartPending: !cable && installedAt !== null && bootedAt < installedAt,
       active: this.routedApp && this.pipelineRunning ? appDisplayName(this.routedApp) : null,

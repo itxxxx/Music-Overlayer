@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MediaCommand, MediaSession, PlaybackStatus, RepeatMode } from '../../../shared/types'
+import { MAX_BOOST } from '@/lib/music-eq'
 import { useWidget } from '@/lib/store'
 
 const STATUS_HOLD_MS = 2000
@@ -8,6 +9,8 @@ const SEEK_HOLD_MS = 2500
 const SETTING_HOLD_MS = 2500
 /** While dragging the volume, send at most this often. */
 const VOLUME_SEND_MS = 40
+/** Close to 100% snaps to exactly 100%, so leaving the boost is easy. */
+const SNAP_TO_FULL = 0.03
 
 interface Held<T> {
   value: T
@@ -62,6 +65,7 @@ export function useTicker(active: boolean, intervalMs = 250): number {
 export function usePlayback() {
   const session = useWidget((state) => state.session)
   const receivedAt = useWidget((state) => state.sessionReceivedAt)
+  const boostAvailable = useWidget((state) => state.musicEq.boostAvailable)
   const [heldStatus, setHeldStatus] = useState<{ status: PlaybackStatus; until: number } | null>(null)
   const [heldSeek, setHeldSeek] = useState<{ positionMs: number; at: number } | null>(null)
 
@@ -98,9 +102,13 @@ export function usePlayback() {
   const playing = status === 'playing'
   const [shuffle, holdShuffle] = useHeld<boolean | null>(session?.shuffle ?? null)
   const [repeat, holdRepeat] = useHeld<RepeatMode | null>(session?.repeat ?? null)
-  const [volume, holdVolume] = useHeld<number | null>(session?.volume ?? null, sameVolume)
+  // What the slider shows: the player's own level times the overlay's boost (up to 200%).
+  const reportedVolume = typeof session?.volume === 'number' ? session.volume * (session.boost ?? 1) : null
+  const [volume, holdVolume] = useHeld<number | null>(reportedVolume, sameVolume)
   const [muted, holdMuted] = useHeld<boolean | null>(session?.muted ?? null)
+  const maxVolume = boostAvailable ? MAX_BOOST : 1
   const lastVolumeSend = useRef(0)
+  const lastSent = useRef<{ app: string; level: number; boost: number } | null>(null)
   const volumeTimer = useRef(0)
   useEffect(() => () => window.clearTimeout(volumeTimer.current), [])
 
@@ -160,19 +168,35 @@ export function usePlayback() {
     },
     volume,
     muted,
-    /** While dragging pass `final: false`; the last value is always sent. */
+    /** 1, or 2 (200%) when the overlay can boost the player. */
+    maxVolume,
+    /**
+     * 0 to `maxVolume`. Up to 100% it's the player's own level in the Windows mixer; above, the
+     * player stays at 100% and the overlay boosts it. While dragging pass `final: false`; the
+     * last value is always sent.
+     */
     setVolume: (value: number, final: boolean) => {
-      const level = Math.min(1, Math.max(0, value))
-      holdVolume(level)
-      if (muted && level > 0) {
+      let target = Math.min(maxVolume, Math.max(0, value))
+      if (maxVolume > 1 && Math.abs(target - 1) < SNAP_TO_FULL) target = 1
+      holdVolume(target)
+      if (muted && target > 0) {
         holdMuted(false)
         send({ type: 'mute', value: false })
       }
+      const app = session?.appId ?? ''
+      const level = Math.min(1, target)
+      const boost = Math.max(1, Math.round(target * 100) / 100)
       window.clearTimeout(volumeTimer.current)
       const wait = lastVolumeSend.current + VOLUME_SEND_MS - Date.now()
       const fire = () => {
         lastVolumeSend.current = Date.now()
-        send({ type: 'volume', value: level })
+        const previous = lastSent.current?.app === app ? lastSent.current : null
+        if (final || !previous || Math.abs(previous.level - level) > 0.0005) send({ type: 'volume', value: level })
+        const currentBoost = previous?.boost ?? session?.boost ?? 1
+        if (app && (boost !== currentBoost || (final && boost !== (session?.boost ?? 1)))) {
+          window.musicWidget.setBoost(app, boost)
+        }
+        lastSent.current = { app, level, boost }
       }
       if (final || wait <= 0) fire()
       else volumeTimer.current = window.setTimeout(fire, wait)

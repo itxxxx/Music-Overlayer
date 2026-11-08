@@ -27,6 +27,8 @@ interface LiveCapture {
 const SUSPEND_AFTER_MS = 2000
 /** ...and after this long the system-audio capture is let go entirely. */
 const RELEASE_AFTER_MS = 15000
+/** getDisplayMedia() normally answers within a second; past this it's treated as refused. */
+const CAPTURE_TIMEOUT_MS = 10_000
 
 class AudioLevels {
   private readonly listeners = new Set<Listener>()
@@ -38,6 +40,7 @@ class AudioLevels {
   private energy = 0
   private onLiveEnded: (() => void) | null = null
   private onWantLive: (() => void) | null = null
+  private onNoAudio: (() => void) | null = null
   /** The capture was let go during a long pause and should come back with the music. */
   private released = false
   private suspendTimer = 0
@@ -102,6 +105,11 @@ class AudioLevels {
     this.onWantLive = handler
   }
 
+  /** Called when asking for system audio gave no sound (refused, no audio track or no answer). */
+  setNoAudioHandler(handler: () => void): void {
+    this.onNoAudio = handler
+  }
+
   get isLive(): boolean {
     return this.live !== null
   }
@@ -141,10 +149,24 @@ class AudioLevels {
   private async openLoopback(): Promise<boolean> {
     let stream: MediaStream | null = null
     try {
-      stream = await navigator.mediaDevices.getDisplayMedia({
+      const request = navigator.mediaDevices.getDisplayMedia({
         audio: true,
         video: { width: { max: 64 }, height: { max: 64 }, frameRate: { max: 1 } }
       })
+      // An answer that never comes would otherwise block every later attempt.
+      let timer = 0
+      const timeout = new Promise<never>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error('No answer to the capture request')), CAPTURE_TIMEOUT_MS)
+      })
+      try {
+        stream = await Promise.race([request, timeout])
+      } finally {
+        window.clearTimeout(timer)
+      }
+      // A late answer after the time-out: let it go.
+      void request.then((late) => {
+        if (late !== stream) late.getTracks().forEach((track) => track.stop())
+      }, () => undefined)
       // Only the audio is wanted; drop the screen video right away.
       for (const track of stream.getVideoTracks()) {
         track.stop()
@@ -179,6 +201,7 @@ class AudioLevels {
     } catch (error) {
       stream?.getTracks().forEach((track) => track.stop())
       console.info('[visualizer] system audio unavailable, using simulated levels:', error)
+      this.onNoAudio?.()
       return false
     }
   }

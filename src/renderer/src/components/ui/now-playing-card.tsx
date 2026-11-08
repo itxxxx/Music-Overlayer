@@ -44,11 +44,15 @@ export interface NowPlayingCardProps {
   canRepeat: boolean
   shuffle: boolean | null
   repeat: RepeatMode | null
-  /** The player's volume-mixer level (0–1), or null when it can't be controlled. */
+  /** The player's volume (0 to `volumeMax`), or null when it can't be controlled. */
   volume: number | null
+  /** 1, or 2 when the overlay can boost the player to 200%. */
+  volumeMax?: number
   muted: boolean | null
   /** Tooltip of the volume row, e.g. "Chrome volume (all tabs)". */
   volumeLabel: string
+  /** Added to that tooltip, e.g. how to unlock the boost. */
+  volumeHint?: string | null
   visualizerActive: boolean
   /** Hide the bars entirely (nothing is playing). */
   showVisualizer?: boolean
@@ -303,8 +307,10 @@ export function NowPlayingCard(props: NowPlayingCardProps) {
         <div className="mt-1.5 pl-1 pr-1.5">
           <VolumeControl
             value={props.volume}
+            max={props.volumeMax}
             muted={props.muted === true}
             label={props.volumeLabel}
+            hint={props.volumeHint}
             tint={palette.tint}
             onChange={props.onVolume}
             onToggleMute={props.onToggleMute}

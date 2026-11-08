@@ -1,7 +1,7 @@
 {
   "name": "music-overlayer",
   "productName": "Music Overlayer",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Always-on-top now-playing overlay for Windows with a built-in equalizer. Follows music apps and browser tabs only.",
   "main": "./out/main/index.js",
   "private": true,

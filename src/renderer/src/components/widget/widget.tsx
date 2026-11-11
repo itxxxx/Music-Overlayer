@@ -1,14 +1,14 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { classifyPlayer } from '../../../../shared/apps'
-import { APP_CREDIT, APP_NAME, GEOMETRY, PILL_TOP, type MediaRefusal } from '../../../../shared/types'
+import { APP_AUTHOR, APP_NAME, GEOMETRY, PILL_TOP, type MediaRefusal } from '../../../../shared/types'
 import { NowPlayingCard } from '@/components/ui/now-playing-card'
 import { NowPlayingPill } from '@/components/ui/now-playing-pill'
 import { EqualizerView } from '@/components/widget/equalizer-view'
 import { useBackdrop, useCoverPalette, useDisplayedCover } from '@/hooks/use-cover'
 import { usePlayback } from '@/hooks/use-playback'
 import { audioLevels } from '@/lib/audio-levels'
-import { useWidget } from '@/lib/store'
+import { getState, useWidget } from '@/lib/store'
 import { cn } from '@/lib/utils'
 
 type View = 'player' | 'eq'
@@ -22,9 +22,8 @@ const DRAG_THRESHOLD_PX = 4
 const SPRING = { type: 'spring', stiffness: 380, damping: 34, mass: 0.9 } as const
 /** How long "Spotify didn't change shuffle" stays up. */
 const REFUSAL_NOTICE_MS = 3500
-/** Bars per second while the pill sits faded; full rate whenever it's looked at. */
-const IDLE_FPS = 30
-const ACTIVE_FPS = 60
+/** Bars per second, in the pill and in the open card. */
+const BARS_FPS = 30
 /** Pointer moves over the widget are reported at most this often (see WidgetWindow). */
 const POINTER_SEEN_MS = 250
 /** The widget's position is re-checked this often, in case something moved it without a resize. */
@@ -166,11 +165,24 @@ export function Widget() {
     hoveredRef.current = false
     clearTimer('expand')
     if (expandedRef.current) {
-      startTimer('collapse', viewRef.current === 'eq' ? COLLAPSE_DELAY_EQ_MS : COLLAPSE_DELAY_MS, close)
+      // Typing a name: stay open (the countdown starts once it's done, see below).
+      if (!getState().typing) startTimer('collapse', viewRef.current === 'eq' ? COLLAPSE_DELAY_EQ_MS : COLLAPSE_DELAY_MS, close)
     } else {
       scheduleIdle()
     }
   }, [api, clearTimer, startTimer, close, scheduleIdle])
+
+  // Done typing with the pointer gone: close as if it had just left.
+  const typing = useWidget((state) => state.typing)
+  useEffect(() => {
+    if (typing) {
+      clearTimer('collapse')
+      return
+    }
+    if (expandedRef.current && !hoveredRef.current) {
+      startTimer('collapse', viewRef.current === 'eq' ? COLLAPSE_DELAY_EQ_MS : COLLAPSE_DELAY_MS, close)
+    }
+  }, [typing, clearTimer, startTimer, close])
 
   // Fade after the first few seconds; clean up every timer on unmount.
   useEffect(() => {
@@ -226,7 +238,7 @@ export function Widget() {
 
   // Visualizer
   useEffect(() => audioLevels.setPlaying(playback.playing), [playback.playing])
-  useEffect(() => audioLevels.setMaxFps(idle && !expanded ? IDLE_FPS : ACTIVE_FPS), [idle, expanded])
+  useEffect(() => audioLevels.setMaxFps(BARS_FPS), [])
   useEffect(() => {
     if (!settings.visualizer) audioLevels.stopLive()
   }, [settings.visualizer])
@@ -516,7 +528,20 @@ export function Widget() {
                     visualizerActive={expanded && visualizerOn && playback.playing}
                     showVisualizer={!empty}
                     notice={bridgeProblem ? (bridge.message ?? null) : notice}
-                    credit={`${APP_NAME}, ${APP_CREDIT}`}
+                    credit={
+                      <>
+                        {APP_NAME}, made by{' '}
+                        <button
+                          type="button"
+                          data-no-drag
+                          onClick={() => api.openAuthorPage()}
+                          title={`${APP_AUTHOR} on Discord`}
+                          className="rounded-sm font-extrabold text-white/60 underline decoration-white/25 underline-offset-2 transition-colors hover:text-white hover:decoration-white/70"
+                        >
+                          {APP_AUTHOR}
+                        </button>
+                      </>
+                    }
                     update={updateNotice}
                     onUpdate={() => api.update.install()}
                     onToggle={playback.toggle}

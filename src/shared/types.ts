@@ -66,7 +66,8 @@ export type MediaCommand =
   | { type: 'shuffle'; value: boolean }
   | { type: 'repeat'; value: RepeatMode }
   /** The player's volume-mixer level, 0–1. */
-  | { type: 'volume'; value: number }
+  /** `app`: a given player instead of the shown one (only the main process sets it). */
+  | { type: 'volume'; value: number; app?: string }
   | { type: 'mute'; value: boolean }
 
 /** A command the player turned down, e.g. shuffle in a player that ignores it. */
@@ -175,6 +176,18 @@ export interface PipelineRequest {
   equalize: boolean
   /** Gain on top, 1–2, with a limiter so it can't clip. */
   boost: number
+  /**
+   * Make-up gain: the player plays into the cable at a whisper (so a screen share doesn't get
+   * the music twice), this turns it back up to the level the user chose. Applied first. 1 while
+   * the player isn't turned down.
+   */
+  makeup: number
+  /**
+   * Clip what comes off the cable at this level before the make-up gain (1: no clipping). Just
+   * above the whisper: if the player gets turned up behind the overlay's back, it can't come
+   * out many times too loud.
+   */
+  ceiling: number
 }
 
 /** Where the app's own updates stand (see src/main/updater.ts). */
@@ -222,7 +235,10 @@ export const GEOMETRY = {
 } as const
 
 export const APP_NAME = 'Music Overlayer'
-export const APP_CREDIT = 'made by ITX'
+/** Who made the app, and where the credit's name links to (their Discord profile). */
+export const APP_AUTHOR = 'ITX'
+export const APP_AUTHOR_URL = 'https://discord.com/users/666320003607429170'
+export const APP_CREDIT = `made by ${APP_AUTHOR}`
 
 /** Distance from the window top to the pill top. */
 export const PILL_TOP = (GEOMETRY.windowHeight - GEOMETRY.pillHeight) / 2

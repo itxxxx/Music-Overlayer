@@ -1,12 +1,13 @@
 import { ChevronLeft, LoaderCircle, Plus, RefreshCw, X } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { EqTarget } from '../../../../shared/types'
-import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EQ_PRESETS, PREAMP_MAX_DB, PREAMP_MIN_DB, formatBand } from '../../../../shared/eq'
+import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, EQ_PRESETS, PREAMP_MAX_DB, PREAMP_MIN_DB, PRESET_NAME_MAX, formatBand } from '../../../../shared/eq'
 import { RangeSlider } from '@/components/ui/range-slider'
 import { ResponseCurve } from '@/components/ui/response-curve'
 import { Switch } from '@/components/ui/switch'
 import { useEqualizer } from '@/hooks/use-equalizer'
 import { formatDb } from '@/lib/format'
+import { setState } from '@/lib/store'
 import type { Palette } from '@/lib/palette'
 import { cn } from '@/lib/utils'
 
@@ -21,16 +22,59 @@ interface EqualizerViewProps {
   onBack(): void
 }
 
-function StatusAction({ onClick, children }: { onClick(): void; children: ReactNode }) {
+function StatusAction({ onClick, title, children }: { onClick(): void; title?: string; children: ReactNode }) {
   return (
     <button
       type="button"
       data-no-drag
       onClick={onClick}
+      title={title}
       className="flex h-6 shrink-0 items-center gap-1 rounded-full bg-white/12 px-2.5 text-[11.5px] font-bold text-white transition-colors hover:bg-white/20"
     >
       {children}
     </button>
+  )
+}
+
+/** `editing.id` while the preset being named is a new one. */
+const NEW_PRESET = 'new'
+
+/**
+ * A preset's name being typed, in place of its chip. Enter or clicking away keeps it, Escape
+ * leaves things as they were.
+ */
+function PresetNameField({ initial, label, onDone }: { initial: string; label: string; onDone(name: string | null): void }) {
+  const [value, setValue] = useState(initial)
+  const done = useRef(false)
+  const finish = (name: string | null) => {
+    if (done.current) return
+    done.current = true
+    onDone(name)
+  }
+  const chars = Math.min(22, Math.max(6, Array.from(value).length + 1))
+  return (
+    <input
+      autoFocus
+      data-no-drag
+      aria-label={label}
+      placeholder="Name"
+      value={value}
+      maxLength={PRESET_NAME_MAX}
+      spellCheck={false}
+      autoComplete="off"
+      onChange={(event) => setValue(event.target.value)}
+      onFocus={(event) => {
+        event.currentTarget.select()
+        event.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') finish(value)
+        else if (event.key === 'Escape') finish(null)
+      }}
+      onBlur={() => finish(value)}
+      style={{ width: `calc(${chars}ch + 24px)` }}
+      className="h-7 shrink-0 select-text rounded-full bg-white/14 px-3 text-[12px] font-bold text-white outline-none ring-1 ring-inset ring-white/40 placeholder:text-white/40"
+    />
   )
 }
 
@@ -43,6 +87,26 @@ export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
   const equalizer = useEqualizer()
   const { eq, status, musicEq, activePresetId } = equalizer
   const musicOnly = eq.target === 'music'
+  /** The preset being named (NEW_PRESET for one being saved), and the name it starts with. */
+  const [editing, setEditing] = useState<{ id: string; name: string } | null>(null)
+  const typing = editing !== null
+  // The overlay only takes the keyboard while a name is being typed (and keeps the card open).
+  useEffect(() => {
+    if (!typing) return
+    setState({ typing: true })
+    window.musicWidget.setTyping(true)
+    return () => {
+      setState({ typing: false })
+      window.musicWidget.setTyping(false)
+    }
+  }, [typing])
+  const finishEditing = (name: string | null) => {
+    const current = editing
+    setEditing(null)
+    if (!current || name === null) return
+    if (current.id === NEW_PRESET) equalizer.savePreset(name)
+    else equalizer.renamePreset(current.id, name)
+  }
   const live = musicOnly ? musicEq.cable && !musicEq.error : status.connected && !status.error
 
   let statusText: string
@@ -73,11 +137,9 @@ export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
       action = <StatusAction onClick={() => void equalizer.installCable()}>Set up</StatusAction>
     } else if (!eq.enabled) {
       statusText = 'Equalizer is off'
-    } else if (musicEq.active) {
-      statusText = `Equalizing ${musicEq.active} only`
-      statusTone = 'live'
     } else {
-      statusText = 'Ready. It equalizes the player shown here while it plays.'
+      statusText = musicEq.active ? `Equalizing ${musicEq.active} only` : 'Ready. It equalizes the player shown here while it plays.'
+      if (musicEq.active) statusTone = 'live'
     }
   } else if (!status.supported) {
     statusText = 'The equalizer works on Windows.'
@@ -247,26 +309,36 @@ export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
             >
               Custom
             </span>
-            <button
-              type="button"
-              data-no-drag
-              onClick={equalizer.savePreset}
-              className="flex h-7 shrink-0 items-center gap-1 rounded-full bg-white/10 px-2.5 text-[12px] font-bold text-white/85 transition-colors hover:bg-white/16"
-            >
-              <Plus className="size-3.5" strokeWidth={2.8} />
-              Save
-            </button>
+            {editing?.id === NEW_PRESET ? (
+              <PresetNameField initial={editing.name} label="Name for the new preset" onDone={finishEditing} />
+            ) : (
+              <button
+                type="button"
+                data-no-drag
+                onClick={() => setEditing({ id: NEW_PRESET, name: equalizer.nextPresetName() })}
+                title="Save these bands as a preset and name it"
+                className="flex h-7 shrink-0 items-center gap-1 rounded-full bg-white/10 px-2.5 text-[12px] font-bold text-white/85 transition-colors hover:bg-white/16"
+              >
+                <Plus className="size-3.5" strokeWidth={2.8} />
+                Save
+              </button>
+            )}
           </>
         )}
         {chips.map((preset) => {
           const active = preset.id === activePresetId
           const removable = userPresetIds.has(preset.id)
+          if (removable && editing?.id === preset.id) {
+            return <PresetNameField key={preset.id} initial={editing.name} label={`New name for ${preset.name}`} onDone={finishEditing} />
+          }
           return (
             <span key={preset.id} className="group relative flex shrink-0">
               <button
                 type="button"
                 data-no-drag
                 onClick={() => equalizer.applyPreset(preset.id)}
+                onDoubleClick={removable ? () => setEditing({ id: preset.id, name: preset.name }) : undefined}
+                title={removable ? `${preset.name}. Double-click to rename.` : undefined}
                 className={cn(
                   'h-7 rounded-full px-3 text-[12px] font-bold transition-colors',
                   !active && 'bg-white/10 text-white/80 hover:bg-white/16 hover:text-white',
@@ -274,7 +346,7 @@ export function EqualizerView({ palette, onBack }: EqualizerViewProps) {
                 )}
                 style={active ? { background: palette.tint, color: palette.tintInk } : undefined}
               >
-                {preset.name}
+                <span className="block max-w-[150px] truncate">{preset.name}</span>
               </button>
               {removable && (
                 <button

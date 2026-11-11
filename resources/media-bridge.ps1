@@ -24,7 +24,9 @@
                                                       when the player's volume can't be found
     {"t":"cover","key":"...","mime":"image/jpeg","b64":"..."}   mime and b64 are null without
                                                       artwork, and "why" says what happened
-    {"t":"cable","id":"{0.0.0.00000000}.{...}","routing":true}   VB-CABLE's "CABLE Input", or id null
+    {"t":"cable","id":"{0.0.0.00000000}.{...}","routing":true,"bits":24}   VB-CABLE's "CABLE Input", or id
+                                                      null; bits: the cable's sample size, 0 if unknown.
+                                                      Sent at start, on "cable", and when it changes
     {"t":"routed","app":"Spotify.exe","n":1}        the app's sound now goes to the cable (n processes)
     {"t":"unrouted","app":"Spotify.exe","n":1}      back to the default device ("exited" when it quit)
     {"t":"ack","cmd":"next","ok":true}
@@ -37,6 +39,7 @@
   Input: one command per line on stdin
     toggle | play | pause | next | prev | stop | seek <ms> | shuffle <0|1> | repeat <0|1|2>
     volume <0-1> | mute <0|1>                       the shown player's volume-mixer level
+    volume <0-1> <base64 app id>                    the same for a given player
     cable                                           look for VB-CABLE again
     route <endpoint id>                             send the shown player's sound to that device
     unroute <base64 app id> | unroute *             send it (or everything routed) back to the default
@@ -712,18 +715,30 @@ function Update-Sessions {
 
 # --- Music-only equalizer: VB-CABLE routing --------------------------------------------------------
 
-function Send-CableStatus {
+$script:lastCableJson = ''
+$script:cableCheckedAt = [DateTime]::MinValue
+# -IfChanged: only when something changed since the last report (the 10-second re-check, which
+# notices VB-CABLE installed, removed or switched between 16 and 24 bit in Sound settings).
+function Send-CableStatus([switch]$IfChanged) {
+  $script:cableCheckedAt = [DateTime]::UtcNow
   $id = $null
   $routing = $false
+  $bits = 0
   $why = ''
   if ($script:native) {
     try { $id = [MusicOverlayer.AudioDevices]::FindCableInput() } catch { $why = $_.Exception.Message }
     try { $routing = [MusicOverlayer.AudioRouting]::Available } catch { $why = $_.Exception.Message }
     if (-not $routing -and -not $why) { $why = [string][MusicOverlayer.AudioRouting]::LastError }
+    if ($id) {
+      try { $bits = [MusicOverlayer.AudioDevices]::CableBits() } catch { $bits = 0 }
+    }
   } else {
     $why = $script:nativeError
   }
-  Send-Json ([ordered]@{ t = 'cable'; id = $id; routing = $routing; why = $why })
+  $json = ConvertTo-Json -InputObject ([ordered]@{ t = 'cable'; id = $id; routing = $routing; bits = $bits; why = $why }) -Compress -Depth 5
+  if ($IfChanged -and $json -eq $script:lastCableJson) { return }
+  $script:lastCableJson = $json
+  Send-Line $json
 }
 if (-not $Diagnose) { Send-CableStatus }
 
@@ -776,6 +791,8 @@ function Invoke-MediaCommand([string]$Line) {
     elseif (-not $script:shownId) { $why = 'no player is shown' }
     else {
       $count = [MusicOverlayer.AudioRouting]::Route($script:shownId, $argument)
+      # Its sound now starts a new session on the cable: look for it often for a few seconds.
+      [MusicOverlayer.AudioApps]::RefreshSoon(4000)
       if ($count -eq 0) { $why = [string][MusicOverlayer.AudioRouting]::LastError }
       if ($count -eq 0 -and -not $why) { $why = "the player isn't playing through any output device yet" }
     }
@@ -784,6 +801,7 @@ function Invoke-MediaCommand([string]$Line) {
   }
   if ($name -eq 'unroute') {
     if (-not $script:native) { return }
+    [MusicOverlayer.AudioApps]::RefreshSoon(4000)
     if ($argument -eq '*') {
       Send-Routed 'unrouted' '*' ([MusicOverlayer.AudioRouting]::UnrouteAll())
       return
@@ -793,12 +811,20 @@ function Invoke-MediaCommand([string]$Line) {
     return
   }
   if ($name -eq 'volume' -or $name -eq 'mute') {
-    # The volume-mixer level of the shown player, through the native helper.
+    # The volume-mixer level of the shown player, through the native helper. "volume <level>
+    # <base64 app id>" sets a given player's instead (the overlay turning one down on the cable,
+    # or back up): every session it has, read fresh, since moving it to the cable starts a new one.
     $ok = $false
-    if ($script:native -and $script:shownId) {
+    $target = [string]$script:shownId
+    $named = $false
+    if ($name -eq 'volume' -and $parts.Count -gt 2 -and $parts[2]) {
+      $target = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[2]))
+      $named = $true
+    }
+    if ($script:native -and $target) {
       if ($name -eq 'volume') {
         $level = [double]::Parse($argument, [System.Globalization.CultureInfo]::InvariantCulture)
-        $ok = [MusicOverlayer.AudioApps]::SetLevel($script:shownId, $level) -gt 0
+        $ok = [MusicOverlayer.AudioApps]::SetLevel($target, $level, $named) -gt 0
       } else {
         $ok = [MusicOverlayer.AudioApps]::SetMuted($script:shownId, ($argument -eq '1')) -gt 0
       }
@@ -907,7 +933,7 @@ function Invoke-Diagnose {
     Send-Line 'Output devices:'
     foreach ($output in [MusicOverlayer.AudioDevices]::Outputs()) { Send-Line "  $($output.Value)  $($output.Key)" }
     $cable = [MusicOverlayer.AudioDevices]::FindCableInput()
-    if ($cable) { Send-Line "VB-CABLE: found ($cable)" } else { Send-Line 'VB-CABLE: not found' }
+    if ($cable) { Send-Line "VB-CABLE: found ($cable), $([MusicOverlayer.AudioDevices]::CableBits()) bit" } else { Send-Line 'VB-CABLE: not found' }
     if ([MusicOverlayer.AudioRouting]::Available) { Send-Line "Per-app routing: available ($([MusicOverlayer.AudioRouting]::Variant) interface)" }
     else { Send-Line "Per-app routing: NOT available. $([MusicOverlayer.AudioRouting]::LastError)" }
   }
@@ -974,6 +1000,9 @@ while ($true) {
   # Every 5 s: this process's own CPU and memory, for the overlay's usage total. It also tells
   # the widget the bridge is alive (it restarts a bridge that goes quiet for too long).
   if (([DateTime]::UtcNow - $script:lastUsageAt).TotalSeconds -ge 5) { Send-Usage }
+  if ($script:native -and ([DateTime]::UtcNow - $script:cableCheckedAt).TotalSeconds -ge 10) {
+    try { Send-CableStatus -IfChanged } catch { Send-Error "Couldn't check VB-CABLE: $($_.Exception.Message)" }
+  }
 
   # Read often while music plays; when it doesn't, nothing moves, so read less.
   $interval = $IdlePollMs

@@ -21,6 +21,11 @@ export interface StoredState {
   routedApps: string[]
   /** Volume boost per player (app id -> 1–2, where 2 is 200%). Players at 100% aren't listed. */
   boosts: Record<string, number>
+  /**
+   * Players turned down to a whisper on the cable, with the volume to give back (survives a
+   * crash, so the next start can put it right).
+   */
+  whispering: Record<string, number>
 }
 
 function defaults(): StoredState {
@@ -34,7 +39,8 @@ function defaults(): StoredState {
     apoInstalledAt: null,
     cableInstalledAt: null,
     routedApps: [],
-    boosts: {}
+    boosts: {},
+    whispering: {}
   }
 }
 
@@ -72,8 +78,20 @@ function sanitize(input: unknown): StoredState {
     routedApps: Array.isArray(raw.routedApps)
       ? raw.routedApps.filter((app): app is string => typeof app === 'string' && app.length > 0 && app.length < 400).slice(0, 10)
       : [],
-    boosts: sanitizeBoosts(raw.boosts)
+    boosts: sanitizeBoosts(raw.boosts),
+    whispering: sanitizeLevels(raw.whispering)
   }
+}
+
+/** App id -> volume 0–1, for a handful of players. */
+function sanitizeLevels(input: unknown): Record<string, number> {
+  const levels: Record<string, number> = {}
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return levels
+  for (const [app, value] of Object.entries(input).slice(-10)) {
+    if (app.length === 0 || app.length >= 400 || typeof value !== 'number' || !Number.isFinite(value)) continue
+    levels[app] = clamp(value, 0, 1)
+  }
+  return levels
 }
 
 export const MAX_BOOST = 2

@@ -30,6 +30,8 @@ export interface WidgetState {
   refusal: MediaRefusal | null
   /** False while the widget is hidden from the tray. */
   visible: boolean
+  /** A name is being typed (a preset's): the card stays open and the window has the keyboard. */
+  typing: boolean
 }
 
 type Listener = () => void
@@ -51,7 +53,8 @@ export function initStore(initial: InitialState): void {
     musicEq: initial.musicEq,
     update: initial.update,
     refusal: null,
-    visible: true
+    visible: true,
+    typing: false
   }
 }
 

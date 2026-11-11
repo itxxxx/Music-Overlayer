@@ -54,11 +54,19 @@ function connectMusicEq(inputName: string | undefined): void {
     audioLevels.attach(null)
     api.reportPipeline({ running: false, error: message })
   }
+  // The cable came through louder than the whisper: the make-up gain is already off.
+  pipeline.onLoud = () => {
+    step('music path', 'cable louder than expected, make-up gain off')
+    api.reportPipeline({ running: true, makeup: 1, loud: true })
+  }
   // For tests: the audio path as it stands.
   ;(window as unknown as { __musicWidgetPipeline: () => object }).__musicWidgetPipeline = () => ({
     running: pipeline.running,
     boost: pipeline.boostLevel,
-    limiter: pipeline.limiterInPath
+    limiter: pipeline.limiterInPath,
+    makeup: pipeline.makeupLevel,
+    guard: pipeline.guardLevel,
+    bands: pipeline.bandsInPath
   })
   api.onPipeline((request) => {
     step('music path', request.run ? `asked to run (equalize ${request.equalize})` : 'asked to stop')
@@ -72,14 +80,19 @@ function connectMusicEq(inputName: string | undefined): void {
     // Already running: only the equalizer switch or the boost changed.
     const alreadyAsked = wanted && pipeline.running
     wanted = true
-    const starting = pipeline.start(getState().eq, request.equalize, request.boost)
-    if (alreadyAsked) return
+    const starting = pipeline.start(getState().eq, request.equalize, request.boost, request.makeup, request.ceiling)
+    if (alreadyAsked) {
+      // Tell the main process what make-up gain now applies (it waits for this before turning
+      // a player's own volume back up).
+      api.reportPipeline({ running: true, makeup: pipeline.makeupLevel })
+      return
+    }
     starting
       .then(() => {
         if (!wanted || !pipeline.running) return
         audioLevels.attach(pipeline.analyser)
         step('music path', 'running')
-        api.reportPipeline({ running: true })
+        api.reportPipeline({ running: true, makeup: pipeline.makeupLevel })
       })
       .catch((error: unknown) => {
         step('music path', `failed: ${error instanceof Error ? error.message : String(error)}`)

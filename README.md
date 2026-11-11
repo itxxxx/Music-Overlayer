@@ -1,3 +1,5 @@
+<img src="resources/icon.png" width="96" alt="Music Overlayer logo">
+
 # Music Overlayer
 
 **Made by ITX**
@@ -17,6 +19,14 @@ This installs Music Overlayer for your account (no admin needed), offers to set 
 To uninstall, go to Windows Settings → Apps → Installed apps → Music Overlayer.
 
 Music Overlayer needs 64-bit Windows 10 or 11.
+
+## What's new in 1.3.0
+
+- **No more music twice on screen share.** When you share your screen on Discord with the music-only equalizer on (or the volume above 100%), viewers used to hear your music twice. Now they hear it once, equalized, just like you. There's nothing to turn on. See [Troubleshooting](#troubleshooting).
+- **Name your presets.** Saving your own equalizer settings now asks for a name, and you can rename a saved preset by double-clicking it.
+- **New volume slider.** It grows under the pointer, stretches when you pull past either end, and shows the level while you hover or drag. It still goes up to 200%.
+- **Smoother equalizer curve.** The line behind the bands now runs smoothly through every slider, so bands at the same level make a straight line.
+- **Lighter.** About a quarter less memory (two fewer background processes), and less CPU while music plays: bands left at 0 dB no longer cost anything, and the bars wake the PC half as often.
 
 ## What's new in 1.2.0
 
@@ -42,7 +52,7 @@ To update, run the install command again.
 - **Card:** move the pointer over the pill and it comes back to full opacity. Rest there for 0.3 s and it opens into the card, with the cover art, a timeline you can drag to seek, previous/play-pause/next, and shuffle/repeat when the player supports them. Shuffle and repeat light up when they're on; repeat one shows a small 1.
 - **Volume:** the slider under the controls changes the player's own volume, not your whole PC's. Up to 100% it's the same level as the player's slider in the Windows volume mixer; past 100% it boosts the player, up to 200%. For a browser tab it changes the whole browser, because Windows has no volume per tab.
 - **Which player:** the overlay follows the player you started last, and stays on it through pauses and song changes until you start another one. To pick another player yourself, click the player name on the cover.
-- **Equalizer:** 10 bands, presets, your own saved presets and a preamp. By default it changes only the music player the overlay shows. Open it with the sliders button on the cover.
+- **Equalizer:** 10 bands, presets, your own named presets and a preamp. By default it changes only the music player the overlay shows. Open it with the sliders button on the cover.
 - **Colours:** the overlay picks its colours from the current album art.
 - **Always on top:** it stays above other windows without taking focus. Clicks pass through everywhere except the overlay itself.
 
@@ -50,7 +60,7 @@ To update, run the install command again.
 | --- | --- |
 | Open the card | Rest the pointer on the pill for 0.3 s, or click it |
 | Seek | Click or drag the timeline |
-| Change the player's volume | Drag the volume slider, or scroll over it. Past the notch in the middle it boosts the player up to 200%. Click the speaker to mute. |
+| Change the player's volume | Drag the volume slider, or scroll over it. Hover over it to see the level. Past the notch in the middle it boosts the player up to 200%. Click the speaker on the left to mute. |
 | Switch player | Click the player name on the cover. It only works when more than one player is open. |
 | Move the overlay | Drag it. The position is remembered. |
 | Settings, hide, quit | Right-click the overlay, or use the tray icon |
@@ -83,6 +93,7 @@ Some things to know:
 - For a browser tab, the whole browser goes through the equalizer, because Windows treats the browser as one app.
 - The music gets a small delay, about the time it takes to blink. You won't notice it in music; a video may look very slightly out of sync.
 - When Music Overlayer is closed, or the music stays paused for 20 seconds, the player goes back to playing straight to your speakers, without the equalizer.
+- While the equalizer works, the Windows volume mixer shows the player at 1% (or 5%). That's on purpose: the player itself plays very quietly and Music Overlayer turns it back up to the volume you chose, so a screen share only gets the music once. Use the overlay's volume slider as usual; if you change the player's volume in the Windows mixer, Music Overlayer turns it back down. The player gets its own volume back when the equalizer stops.
 - While the equalizer works, Windows shows Music Overlayer as using a microphone. That's VB-CABLE's recording side, which carries your music. Nothing is recorded or saved.
 
 **Everything** changes all the sound on your speakers or headphones, including voices in Discord calls and games. It uses **Equalizer APO** (free, open source), which the panel offers to set up the same way. Then:
@@ -90,6 +101,8 @@ Some things to know:
 - If you already use Equalizer APO, your own settings stay as they are; Music Overlayer only adds its own. To remove them, use tray → **Equalizer engine** → **Unlink Music Overlayer**.
 
 Use the switch at the top of the equalizer panel to turn the equalizer off.
+
+To keep your own settings, move the bands until **Custom** shows below them, click **Save**, type a name and press Enter. To rename a saved preset, double-click it. To delete it, click its ×.
 
 ## Volume above 100%
 
@@ -112,6 +125,16 @@ The portable version can't replace itself. When a new version is out, the card s
 
 ## Troubleshooting
 
+**People watching my screen share hear the music twice.**
+When you share your whole screen, Discord records the sound of each program on its own: the player's own sound, which goes into VB-CABLE, and the overlay's equalized copy a moment later. Since 1.3.0 the player itself plays almost silently while the equalizer works, and the overlay turns it back up, so the copy Discord takes from the player is too quiet to hear. Update to 1.3.0 or later.
+
+How quiet depends on VB-CABLE's quality setting. At 24 bit the player plays at 1% and viewers can't hear it at all. At 16 bit, which some computers use by default, it plays at 5% so the music keeps its quality, and a sharp ear may still catch a faint echo. To use 24 bit:
+1. Press Win+R and run `mmsys.cpl`.
+2. On **Playback**, open **CABLE Input** → **Properties** → **Advanced** and choose **24 bit, 48000 Hz**.
+3. On **Recording**, do the same for **CABLE Output**.
+
+Music Overlayer notices the change within a few seconds.
+
 **The overlay is stuck: it can't be dragged and the buttons do nothing.**
 It should recover by itself, within a minute at most. If it doesn't, use tray → **Restart Music Overlayer**. If it keeps happening, the log at `%APPDATA%\Music Overlayer\logs\main.log` shows what went on; attach it when you report the problem.
 
@@ -133,8 +156,8 @@ Some players don't share their artwork with Windows. Tray → **Find missing cov
 **Music only says "Windows blocks apps from using recording devices".**
 VB-CABLE's recording side counts as a microphone. In Windows Settings → Privacy → Microphone, turn on **Let desktop apps access your microphone**.
 
-**A player is silent.**
-If Music Overlayer was closed unexpectedly while the equalizer worked, the player may still be sending its sound to VB-CABLE. Start Music Overlayer again and it puts it back. You can also reset it in Windows Settings → System → Sound → Volume mixer → **Reset**.
+**A player is silent or very quiet.**
+If Music Overlayer was closed unexpectedly while the equalizer worked, the player may still be sending its sound to VB-CABLE, or still be turned down to 1% in the Windows volume mixer. Start Music Overlayer again and it puts both back. You can also turn the player up in the volume mixer yourself, or reset it in Windows Settings → System → Sound → Volume mixer → **Reset**.
 
 **There's no volume slider.**
 The slider only shows when the player appears in the Windows volume mixer. Play something in it and it shows up.

@@ -28,9 +28,15 @@ const START_MARK = '# >>> Music Overlayer equalizer'
 const END_MARK = '# <<< Music Overlayer equalizer'
 const BLOCK_START = `${START_MARK} (added by Music Overlayer - delete these lines to unlink it)`
 const INCLUDE_LINE = /^[ \t]*Include:[ \t]*music-overlayer-eq\.txt[ \t]*$/im
-/** What earlier builds (named "Music Widget") wrote; replaced when linking. */
-const LEGACY_MARKS: Array<[string, string]> = [['# >>> Music Widget equalizer', '# <<< Music Widget equalizer']]
-const LEGACY_FILES = ['music-widget-eq.txt']
+/**
+ * What other builds wrote (early ones named "Music Widget", 1.3.0 test builds named "Starover");
+ * replaced when linking.
+ */
+const LEGACY_MARKS: Array<[string, string]> = [
+  ['# >>> Music Widget equalizer', '# <<< Music Widget equalizer'],
+  ['# >>> Starover equalizer', '# <<< Starover equalizer']
+]
+const LEGACY_FILES = ['music-widget-eq.txt', 'starover-eq.txt']
 
 interface Location {
   configDir: string

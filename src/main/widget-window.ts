@@ -11,6 +11,8 @@ const POLL_HIDDEN_MS = 500
 const NEAR_DISTANCE = 140
 const LEAVE_GRACE_MS = 250
 const POINTER_HOLD_LIMIT_MS = 15_000
+/** Typing keeps the card open, but not forever if the page never says it's done. */
+const TYPING_LIMIT_MS = 5 * 60_000
 /** The page saw the pointer on the widget this recently: believe it over the cursor maths here. */
 const PAGE_SAW_POINTER_MS = 800
 /** A drag whose release was never seen ends by itself. */
@@ -54,6 +56,11 @@ export class WidgetWindow {
   private paintStallReported = false
   private pointerActive = false
   private pointerActiveSince = 0
+  /** A text field on the page has the keyboard (see setTyping). */
+  private typing = false
+  private typingSince = 0
+  /** The window was made focusable for typing and hasn't given that back yet. */
+  private focusTaken = false
   private dragging = false
   private dragStartedAt = 0
   private dragOffset = { x: 0, y: 0 }
@@ -107,6 +114,10 @@ export class WidgetWindow {
     win.on('closed', () => {
       this.win = null
       this.stopPolling()
+    })
+    // Done typing and now you've clicked somewhere else: back to a window that never takes focus.
+    win.on('blur', () => {
+      if (this.focusTaken && !this.typing) this.giveFocusBack()
     })
 
     if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -184,6 +195,7 @@ export class WidgetWindow {
     this.pageHover = false
     this.hitRect = null
     this.pointerActive = false
+    this.setTyping(false)
     this.endDrag()
     this.setInteractive(false)
     this.pageAlive(true)
@@ -208,6 +220,41 @@ export class WidgetWindow {
   setPointerActive(active: boolean): void {
     this.pointerActive = active
     this.pointerActiveSince = active ? Date.now() : 0
+  }
+
+  /**
+   * A text field on the page (a preset's name) wants the keyboard, or is done with it. The
+   * window normally can't take focus, so clicking it never takes the keyboard away from the app
+   * you're in. While you type it can, and the card stays open wherever the pointer goes.
+   */
+  setTyping(on: boolean): void {
+    const win = this.win
+    this.typing = on
+    this.typingSince = on ? Date.now() : 0
+    if (!win || win.isDestroyed()) return
+    if (on) {
+      if (!this.focusTaken) {
+        this.focusTaken = true
+        win.setFocusable(true)
+        // Becoming focusable gives it a taskbar button on Windows: not wanted.
+        win.setSkipTaskbar(true)
+      }
+      this.setInteractive(true)
+      win.focus()
+    } else if (this.focusTaken && !win.isFocused()) {
+      this.giveFocusBack()
+    }
+    // Done but still focused (Enter): it keeps the focus until you click somewhere else. Making
+    // it unfocusable now would hand the focus to whatever window is next in line, often the
+    // taskbar, instead of the app you were in.
+  }
+
+  private giveFocusBack(): void {
+    this.focusTaken = false
+    const win = this.win
+    if (!win || win.isDestroyed()) return
+    win.setFocusable(false)
+    win.setSkipTaskbar(true)
   }
 
   beginDrag(): void {
@@ -378,7 +425,8 @@ export class WidgetWindow {
     const near = dx < NEAR_DISTANCE && dy < NEAR_DISTANCE
     // A held slider keeps the mouse; a press whose release was never seen stops counting after a while.
     const holding = this.pointerActive && Date.now() - this.pointerActiveSince < POINTER_HOLD_LIMIT_MS
-    if (!this.interactive || holding) {
+    const typing = this.typing && Date.now() - this.typingSince < TYPING_LIMIT_MS
+    if (!this.interactive || holding || typing) {
       this.outsideSince = 0
       return near || this.interactive ? POLL_NEAR_MS : POLL_FAR_MS
     }

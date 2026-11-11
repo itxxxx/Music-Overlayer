@@ -36,7 +36,7 @@ type BridgeMessage =
   | { t: 'ready' }
   | { t: 'state'; n: number; s: RawSession | null }
   | { t: 'cover'; key: string; mime: string | null; b64: string | null; why?: string }
-  | { t: 'cable'; id: string | null; routing: boolean; why?: string }
+  | { t: 'cable'; id: string | null; routing: boolean; bits?: number; why?: string }
   | ({ t: 'routed' } & RouteResult)
   | ({ t: 'unrouted' } & RouteResult)
   | { t: 'ack'; cmd: string; ok: boolean }
@@ -112,8 +112,10 @@ export function toCommandLine(command: MediaCommand, timelineStartMs: number): s
       return `shuffle ${command.value ? 1 : 0}`
     case 'repeat':
       return `repeat ${Math.max(0, REPEAT.indexOf(command.value))}`
-    case 'volume':
-      return `volume ${Math.min(1, Math.max(0, command.value)).toFixed(3)}`
+    case 'volume': {
+      const level = Math.min(1, Math.max(0, command.value)).toFixed(3)
+      return command.app ? `volume ${level} ${Buffer.from(command.app, 'utf8').toString('base64')}` : `volume ${level}`
+    }
     case 'mute':
       return `mute ${command.value ? 1 : 0}`
   }
@@ -330,9 +332,14 @@ export class WindowsMediaBridge extends MediaSource {
         })
         break
       case 'cable': {
-        const cable: CableInfo = { id: typeof message.id === 'string' && message.id ? message.id : null, routing: message.routing === true }
+        const cable: CableInfo = {
+          id: typeof message.id === 'string' && message.id ? message.id : null,
+          routing: message.routing === true,
+          bits: typeof message.bits === 'number' && message.bits > 0 ? message.bits : null
+        }
         if (message.why) cable.why = message.why
-        log('bridge', `VB-CABLE ${cable.id ? 'found' : 'not found'}, per-app routing ${cable.routing ? 'available' : `unavailable${message.why ? `: ${message.why}` : ''}`}`)
+        const found = cable.id ? `found${cable.bits ? ` (${cable.bits}-bit)` : ''}` : 'not found'
+        log('bridge', `VB-CABLE ${found}, per-app routing ${cable.routing ? 'available' : `unavailable${message.why ? `: ${message.why}` : ''}`}`)
         this.emit('cable', cable)
         break
       }

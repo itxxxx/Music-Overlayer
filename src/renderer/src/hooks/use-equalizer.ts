@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import { EQ_PRESETS } from '../../../shared/eq'
+import { EQ_PRESETS, cleanPresetName, defaultPresetName } from '../../../shared/eq'
 import type { EqSettings, EqTarget } from '../../../shared/types'
 import { getState, setState, useWidget } from '@/lib/store'
 
@@ -54,13 +54,21 @@ export function useEqualizer() {
         const preset = [...EQ_PRESETS, ...current.userPresets].find((p) => p.id === id)
         return preset ? { ...current, gains: [...preset.gains], presetId: preset.id, enabled: true } : current
       }),
-    savePreset: () =>
+    /** The name a new preset starts with, before the user types their own. */
+    nextPresetName: () => defaultPresetName(getState().eq.userPresets),
+    /** Saves the current curve as a preset with this name (blank: "My preset N"). */
+    savePreset: (name = '') =>
       update((current) => {
-        const numbers = current.userPresets.map((p) => Number(/(\d+)$/.exec(p.name)?.[1] ?? 0))
-        const name = `My preset ${Math.max(0, ...numbers) + 1}`
         const id = `user-${Date.now().toString(36)}`
-        return { ...current, userPresets: [...current.userPresets, { id, name, gains: [...current.gains] }], presetId: id }
+        const preset = { id, name: cleanPresetName(name, defaultPresetName(current.userPresets)), gains: [...current.gains] }
+        return { ...current, userPresets: [...current.userPresets, preset], presetId: id }
       }),
+    /** Renames a saved preset (blank keeps the old name). */
+    renamePreset: (id: string, name: string) =>
+      update((current) => ({
+        ...current,
+        userPresets: current.userPresets.map((p) => (p.id === id ? { ...p, name: cleanPresetName(name, p.name) } : p))
+      })),
     deletePreset: (id: string) =>
       update((current) => ({
         ...current,

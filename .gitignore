@@ -4,3 +4,5 @@ dist/
 *.log
 .DS_Store
 COORDINATION.md
+src/renderer/src/components/audio-player-demo.tsx
+src/renderer/src/components/ui/audio-player.tsx

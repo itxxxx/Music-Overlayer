@@ -63,7 +63,9 @@ export class DemoMediaSource extends MediaSource {
   }
 
   checkCable(): void {
-    if (this.fakeCable) this.emit('cable', { id: '{0.0.0.00000000}.{demo-cable}', routing: true })
+    // MUSIC_OVERLAYER_FAKE_CABLE_BITS: the sample size to pretend the cable has (24 by default).
+    const bits = Number(process.env.MUSIC_OVERLAYER_FAKE_CABLE_BITS) || 24
+    if (this.fakeCable) this.emit('cable', { id: '{0.0.0.00000000}.{demo-cable}', routing: true, bits })
   }
 
   route(): void {

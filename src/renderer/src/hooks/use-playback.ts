@@ -9,8 +9,11 @@ const SEEK_HOLD_MS = 2500
 const SETTING_HOLD_MS = 2500
 /** While dragging the volume, send at most this often. */
 const VOLUME_SEND_MS = 40
-/** Close to 100% snaps to exactly 100%, so leaving the boost is easy. */
-const SNAP_TO_FULL = 0.03
+/**
+ * Close to 100% snaps to exactly 100%, so leaving the boost is easy. Less than a wheel step
+ * (5%), so scrolling to 95% or 105% stays there.
+ */
+const SNAP_TO_FULL = 0.045
 
 interface Held<T> {
   value: T

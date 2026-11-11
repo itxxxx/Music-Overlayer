@@ -8,6 +8,8 @@ export interface CableInfo {
   id: string | null
   /** Windows lets the overlay choose another app's output device. */
   routing: boolean
+  /** Bits per sample the cable carries (16 or 24 usually), null when unknown. */
+  bits?: number | null
   why?: string
 }
 

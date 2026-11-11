@@ -46,9 +46,13 @@ export interface WidgetApi {
   setHitRect(rect: HitRect | null): void
   /** A button or slider is being held, so the window must keep mouse input. */
   setPointerActive(active: boolean): void
+  /** A text field has the keyboard (true) or is done with it: see WidgetWindow.setTyping. */
+  setTyping(on: boolean): void
   startDrag(): void
   endDrag(): void
   showMenu(): void
+  /** Opens the author's page (APP_AUTHOR_URL) in the browser. */
+  openAuthorPage(): void
   onDirection(listener: (direction: ExpandDirection) => void): Unsubscribe
   /** Pointer entered or left the widget, detected by the main process. */
   onPointer(listener: (event: 'enter' | 'leave') => void): Unsubscribe
@@ -88,6 +92,8 @@ export interface WidgetApi {
     onStatus(listener: (status: MusicEqStatus) => void): Unsubscribe
     /** The main process asks the window to start, change or stop its audio path. */
     onPipeline(listener: (request: PipelineRequest) => void): Unsubscribe
-    reportPipeline(state: { running: boolean; error?: string }): void
+    /** `makeup`: the make-up gain now applied (see PipelineRequest.makeup). */
+    /** `loud`: the cable was louder than the whisper, so the window took the make-up gain off. */
+    reportPipeline(state: { running: boolean; error?: string; makeup?: number; loud?: boolean }): void
   }
 }

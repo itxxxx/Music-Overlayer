@@ -60,7 +60,7 @@ export interface NowPlayingCardProps {
   /** Shown under the artist, e.g. why media can't be read or that a player ignored a button. */
   notice?: string | null
   /** Small line under the controls. */
-  credit?: string
+  credit?: ReactNode
   /**
    * Takes the credit line's place while there's news about an update: a button when there's
    * something to do ("Restart to update to 1.3.0"), plain text while it downloads.
@@ -178,9 +178,8 @@ function TimelineRow({
 }
 
 /**
- * The expanded card. Adapted from the 21st.dev AudioPlayer (components/ui/audio-player.tsx):
- * same layout and controls, but it drives whichever player Windows reports instead of an
- * <audio> element of its own.
+ * The expanded card. Adapted from the 21st.dev AudioPlayer: same layout and controls, but it
+ * drives whichever player Windows reports instead of an <audio> element of its own.
  */
 export function NowPlayingCard(props: NowPlayingCardProps) {
   const { palette } = props
@@ -318,7 +317,7 @@ export function NowPlayingCard(props: NowPlayingCardProps) {
       </div>
 
       {props.volume !== null && (
-        <div className="mt-1.5 pl-1 pr-1.5">
+        <div className="mt-1.5 px-3">
           <VolumeControl
             value={props.volume}
             max={props.volumeMax}

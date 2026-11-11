@@ -14,7 +14,7 @@ import {
 import { cpus } from 'node:os'
 import { clamp, sanitizeEq } from '../shared/eq'
 import { togglePlayer, type PlayerFilter } from '../shared/apps'
-import { APP_NAME, type EqStatus, type InitialState, type MediaCommand, type MediaSession, type WidgetSettings } from '../shared/types'
+import { APP_AUTHOR_URL, APP_NAME, type EqStatus, type InitialState, type MediaCommand, type MediaSession, type WidgetSettings } from '../shared/types'
 import { DOWNLOAD_URL, EqualizerApo } from './eq/equalizer-apo'
 import { MusicEqController } from './eq/music-eq'
 import { CABLE_PAGE } from './eq/virtual-cable'
@@ -31,11 +31,17 @@ const forceDemo = process.env.MUSIC_OVERLAYER_DEMO === '1'
 
 // The visualizer starts its audio context without a click.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+// Audio and networking run inside the app's main process instead of a process each: about
+// 130 MB less memory in all, for the same CPU. Chromium reads only the last disable-features
+// switch, so everything to switch off goes in this one.
+const disabledFeatures = ['AudioServiceOutOfProcess']
 if (isWindows) {
   // The visualizer hears system audio through screen-capture loopback and drops the video track
   // straight away. Skipping Windows Graphics Capture keeps Windows from drawing a capture border.
-  app.commandLine.appendSwitch('disable-features', 'AllowWgcScreenCapturer,AllowWgcWindowCapturer')
+  disabledFeatures.push('AllowWgcScreenCapturer', 'AllowWgcWindowCapturer')
 }
+app.commandLine.appendSwitch('disable-features', disabledFeatures.join(','))
+app.commandLine.appendSwitch('enable-features', 'NetworkServiceInProcess2')
 
 /** How often the tray menu's CPU and memory line is brought up to date. */
 const USAGE_EVERY_MS = 5000
@@ -123,6 +129,9 @@ async function main(): Promise<void> {
     media,
     getEq: () => settings.get().eq,
     getBoost: (appId) => settings.get().boosts[appId] ?? 1,
+    setAppVolume: (app, level) => media.command({ type: 'volume', value: level, app }),
+    getWhispering: () => settings.get().whispering,
+    setWhispering: (whispering) => settings.update({ whispering }),
     getRoutedApps: () => settings.get().routedApps,
     setRoutedApps: (routedApps) => settings.update({ routedApps }),
     getCableInstalledAt: () => settings.get().cableInstalledAt,
@@ -144,7 +153,9 @@ async function main(): Promise<void> {
   function withBoost(current: MediaSession | null): MediaSession | null {
     if (!current) return null
     const boost = musicEq.current.boostAvailable ? (settings.get().boosts[current.appId] ?? 1) : 1
-    return { ...current, boost }
+    // While the player is turned down on the cable, show the volume the user chose, not the whisper.
+    const whisper = musicEq.whisperLevel(current.appId)
+    return whisper === null ? { ...current, boost } : { ...current, boost, volume: whisper }
   }
 
   const updater = new AppUpdater({
@@ -384,7 +395,19 @@ async function main(): Promise<void> {
     }
   })
   ipcMain.on('media:command', (event, command: unknown) => {
-    if (isOwnSender(event) && isMediaCommand(command)) media.command(command)
+    if (!isOwnSender(event) || !isMediaCommand(command)) return
+    if (command.type === 'volume') {
+      // The window only ever sets the shown player's volume. One turned down on the cable keeps
+      // its whisper: the overlay's make-up gain follows the slider instead.
+      const app = media.session?.appId
+      if (app && musicEq.setWhisperLevel(app, command.value)) {
+        widget.send('media:session', withBoost(media.session))
+        return
+      }
+      media.command({ type: 'volume', value: command.value })
+      return
+    }
+    media.command(command)
   })
   ipcMain.on('media:boost', (event, appId: unknown, value: unknown) => {
     if (!isOwnSender(event) || typeof appId !== 'string' || !appId || appId.length >= 400) return
@@ -416,6 +439,9 @@ async function main(): Promise<void> {
   })
   ipcMain.on('widget:pointer-active', (event, active: unknown) => {
     if (isOwnSender(event)) widget.setPointerActive(active === true)
+  })
+  ipcMain.on('widget:typing', (event, on: unknown) => {
+    if (isOwnSender(event)) widget.setTyping(on === true)
   })
   ipcMain.on('widget:drag-start', (event) => {
     if (isOwnSender(event)) widget.beginDrag()
@@ -449,6 +475,10 @@ async function main(): Promise<void> {
     await apo.installEngine()
     return refreshEq()
   })
+  // The credit's name: only this one fixed address, never one the page passes in.
+  ipcMain.on('app:author-page', (event) => {
+    if (isOwnSender(event)) void shell.openExternal(APP_AUTHOR_URL)
+  })
   ipcMain.on('eq:download', (event) => {
     if (isOwnSender(event)) void shell.openExternal(DOWNLOAD_URL)
   })
@@ -470,8 +500,13 @@ async function main(): Promise<void> {
   })
   ipcMain.on('music-eq:pipeline-state', (event, state: unknown) => {
     if (!isOwnSender(event) || typeof state !== 'object' || state === null) return
-    const { running, error } = state as { running?: unknown; error?: unknown }
-    musicEq.setPipelineState(running === true, typeof error === 'string' ? error.slice(0, 300) : null)
+    const { running, error, makeup, loud } = state as { running?: unknown; error?: unknown; makeup?: unknown; loud?: unknown }
+    musicEq.setPipelineState(
+      running === true,
+      typeof error === 'string' ? error.slice(0, 300) : null,
+      typeof makeup === 'number' && Number.isFinite(makeup) ? makeup : undefined,
+      loud === true
+    )
   })
   ipcMain.on('update:install', (event) => {
     if (isOwnSender(event)) updater.install()
@@ -516,6 +551,14 @@ async function main(): Promise<void> {
   // The page's own check-ins decide whether it hangs (see onPageHung); this is just for the log.
   win.on('unresponsive', () => log('widget', 'Chromium reports the page as unresponsive'))
   win.on('responsive', () => log('widget', 'the page is responsive again'))
+  // Windows shutting down or signing out: Electron's quit events don't come then, so the player
+  // goes back to normal now (off the cable, its own volume back) while there's still time.
+  win.on('session-end', () => {
+    log('app', 'Windows is shutting down or signing out')
+    musicEq.dispose()
+    settings.flush()
+    media.stop()
+  })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event) => event.preventDefault())
 

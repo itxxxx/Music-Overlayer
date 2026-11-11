@@ -5,7 +5,8 @@
 // interpolation, no ?. and no expression-bodied members. It talks to Windows audio through COM:
 //
 //   AudioApps     the per-app volume Windows keeps for each app (the volume mixer).
-//   AudioDevices  finds VB-CABLE's "CABLE Input" among the output devices.
+//   AudioDevices  finds VB-CABLE's "CABLE Input" among the output devices, and the bit depth
+//                 of both of its sides.
 //   AudioRouting  sends one app's sound to another output device, the way Windows Settings >
 //                 Sound > Volume mixer does. That's how only the music app gets equalized.
 
@@ -139,12 +140,15 @@ namespace MusicOverlayer
     }
 
     // Only the parts used here: the type and, for strings, the pointer. The last field makes the
-    // struct as large as the real PROPVARIANT on 64-bit Windows.
+    // struct as large as the real PROPVARIANT on 64-bit Windows. A blob is its size (offset 8)
+    // and a pointer: at 16 on 64-bit Windows (Reserved), at 12 on 32-bit (Word12).
     [StructLayout(LayoutKind.Explicit)]
     internal struct PropVariant
     {
         [FieldOffset(0)] public ushort Type;
         [FieldOffset(8)] public IntPtr Pointer;
+        [FieldOffset(8)] public int Size;
+        [FieldOffset(12)] public int Word12;
         [FieldOffset(16)] public IntPtr Reserved;
     }
 
@@ -174,6 +178,9 @@ namespace MusicOverlayer
         private const int SessionActive = 1;       // AudioSessionStateActive
         private const int SessionExpired = 2;      // AudioSessionStateExpired
         private const int RefreshEveryMs = 3000;
+        // Right after a player is moved to another device, its sound shows up there as a new
+        // session: look this often for a while (see RefreshSoon).
+        private const int RefreshFastMs = 250;
 
         private static readonly Guid SessionManagerId = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
         private static Guid ownChanges = new Guid("5A0C2B6E-3C1B-4B57-9A9E-6D3B1F4E2C71");
@@ -182,6 +189,8 @@ namespace MusicOverlayer
         private static readonly Dictionary<int, string> processNames = new Dictionary<int, string>();
         private static int refreshedAt;
         private static bool everRefreshed;
+        private static int fastUntil;
+        private static bool fast;
 
         public static string LastError { get; private set; }
 
@@ -302,7 +311,20 @@ namespace MusicOverlayer
 
         private static void RefreshIfStale()
         {
-            if (!everRefreshed || Environment.TickCount - refreshedAt > RefreshEveryMs) Refresh();
+            if (fast && Environment.TickCount - fastUntil >= 0) fast = false;
+            int every = fast ? RefreshFastMs : RefreshEveryMs;
+            if (!everRefreshed || Environment.TickCount - refreshedAt > every) Refresh();
+        }
+
+        /// <summary>
+        /// Read the sessions more often for the next `forMs`: a player just moved to another output
+        /// device gets a new session there (with the volume Windows remembers for that device).
+        /// </summary>
+        public static void RefreshSoon(int forMs)
+        {
+            fast = true;
+            fastUntil = Environment.TickCount + forMs;
+            refreshedAt = Environment.TickCount - RefreshEveryMs - 1;
         }
 
         private static void ReleaseAll()
@@ -448,17 +470,28 @@ namespace MusicOverlayer
                         matches = Match(appId);
                     }
                 }
+                // The loudest session that's playing (an app can have one per output device, each
+                // with its own volume), or the first one when none is playing.
                 Session best = null;
+                float level = 0f;
+                bool bestActive = false;
                 foreach (var session in matches)
                 {
                     if (session.Volume == null) continue;
                     int state;
-                    if (best == null || (session.Control.GetState(out state) >= 0 && state == SessionActive)) best = session;
+                    bool active = session.Control.GetState(out state) >= 0 && state == SessionActive;
+                    float sessionLevel;
+                    if (session.Volume.GetMasterVolume(out sessionLevel) < 0) continue;
+                    if (best == null || (active && (!bestActive || sessionLevel > level)))
+                    {
+                        best = session;
+                        level = sessionLevel;
+                        bestActive = active;
+                    }
                 }
                 if (best == null) return result;
-                float level;
                 bool muted;
-                if (best.Volume.GetMasterVolume(out level) < 0 || best.Volume.GetMute(out muted) < 0) return result;
+                if (best.Volume.GetMute(out muted) < 0) return result;
                 result.Found = true;
                 result.Level = Math.Round(Math.Max(0f, Math.Min(1f, level)), 3);
                 result.Muted = muted;
@@ -477,8 +510,17 @@ namespace MusicOverlayer
         /// <summary>Sets the app's volume (0 to 1) in every session it has. Returns how many it set.</summary>
         public static int SetLevel(string appId, double level)
         {
+            return SetLevel(appId, level, false);
+        }
+
+        /// <summary>
+        /// `fresh`: read the sessions again first, so one that just appeared (the player moved to
+        /// another output device) gets the level too. For the overlay turning a player down.
+        /// </summary>
+        public static int SetLevel(string appId, double level, bool fresh)
+        {
             float value = (float)Math.Max(0.0, Math.Min(1.0, level));
-            return Apply(appId, delegate (ISimpleAudioVolume volume)
+            return Apply(appId, fresh, delegate (ISimpleAudioVolume volume)
             {
                 return volume.SetMasterVolume(value, ref ownChanges);
             });
@@ -486,7 +528,7 @@ namespace MusicOverlayer
 
         public static int SetMuted(string appId, bool muted)
         {
-            return Apply(appId, delegate (ISimpleAudioVolume volume)
+            return Apply(appId, false, delegate (ISimpleAudioVolume volume)
             {
                 return volume.SetMute(muted, ref ownChanges);
             });
@@ -494,12 +536,13 @@ namespace MusicOverlayer
 
         private delegate int VolumeChange(ISimpleAudioVolume volume);
 
-        private static int Apply(string appId, VolumeChange change)
+        private static int Apply(string appId, bool fresh, VolumeChange change)
         {
             int changed = 0;
             try
             {
-                RefreshIfStale();
+                if (fresh) Refresh();
+                else RefreshIfStale();
                 List<Session> matches = Match(appId);
                 if (matches.Count == 0)
                 {
@@ -556,23 +599,67 @@ namespace MusicOverlayer
         private static extern int PropVariantClear(ref PropVariant value);
 
         private const int RenderFlow = 0;
+        private const int CaptureFlow = 1;
         private const int ActiveDevices = 1;
         private const int ReadOnly = 0;           // STGM_READ
         private const ushort StringType = 31;     // VT_LPWSTR
+        private const ushort BlobType = 65;       // VT_BLOB
+        private const int ExtensibleFormat = 0xFFFE;
         private static PropertyKey friendlyName = new PropertyKey("A45C254E-DF1C-4EFD-8020-67D146A850E0", 14);
+        // The format Windows uses with the device (Sound settings > Properties > Advanced).
+        private static PropertyKey deviceFormat = new PropertyKey("F19F064D-082C-4E27-BC73-6882A1BB8E4C", 0);
 
         public static string LastError { get; private set; }
+
+        private sealed class Endpoint
+        {
+            public string Id;
+            public string Name = "";
+            public int Bits;
+        }
 
         /// <summary>Id and name of every active output device.</summary>
         public static List<KeyValuePair<string, string>> Outputs()
         {
             var found = new List<KeyValuePair<string, string>>();
+            foreach (var endpoint in Endpoints(RenderFlow, false)) found.Add(new KeyValuePair<string, string>(endpoint.Id, endpoint.Name));
+            return found;
+        }
+
+        /// <summary>
+        /// Bits per sample VB-CABLE carries the sound in: the smaller of its two sides ("CABLE
+        /// Input" and "CABLE Output"), usually 16 or 24. 0 when a side is missing or unreadable.
+        /// </summary>
+        public static int CableBits()
+        {
+            int input = 0;
+            int output = 0;
+            foreach (var endpoint in Endpoints(RenderFlow, true))
+            {
+                if (IsCable(endpoint.Name, "CABLE Input")) input = endpoint.Bits;
+            }
+            foreach (var endpoint in Endpoints(CaptureFlow, true))
+            {
+                if (IsCable(endpoint.Name, "CABLE Output")) output = endpoint.Bits;
+            }
+            return Math.Min(input, output);
+        }
+
+        private static bool IsCable(string name, string side)
+        {
+            return name.IndexOf(side, StringComparison.OrdinalIgnoreCase) >= 0 &&
+                name.IndexOf("VB-Audio", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static List<Endpoint> Endpoints(int flow, bool withBits)
+        {
+            var found = new List<Endpoint>();
             IMMDeviceEnumerator enumerator = null;
             IMMDeviceCollection devices = null;
             try
             {
                 enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorClass();
-                Com.Check(enumerator.EnumAudioEndpoints(RenderFlow, ActiveDevices, out devices), "EnumAudioEndpoints");
+                Com.Check(enumerator.EnumAudioEndpoints(flow, ActiveDevices, out devices), "EnumAudioEndpoints");
                 int count;
                 Com.Check(devices.GetCount(out count), "IMMDeviceCollection.GetCount");
                 for (int i = 0; i < count; i++)
@@ -583,17 +670,19 @@ namespace MusicOverlayer
                     {
                         string id;
                         if (devices.Item(i, out device) < 0 || device == null || device.GetId(out id) < 0) continue;
-                        string name = "";
+                        var endpoint = new Endpoint();
+                        endpoint.Id = id;
                         if (device.OpenPropertyStore(ReadOnly, out store) >= 0 && store != null)
                         {
                             PropVariant value;
                             if (store.GetValue(ref friendlyName, out value) >= 0)
                             {
-                                if (value.Type == StringType && value.Pointer != IntPtr.Zero) name = Marshal.PtrToStringUni(value.Pointer);
+                                if (value.Type == StringType && value.Pointer != IntPtr.Zero) endpoint.Name = Marshal.PtrToStringUni(value.Pointer);
                                 PropVariantClear(ref value);
                             }
+                            if (withBits) endpoint.Bits = BitsOf(store);
                         }
-                        found.Add(new KeyValuePair<string, string>(id, name));
+                        found.Add(endpoint);
                     }
                     finally
                     {
@@ -615,14 +704,44 @@ namespace MusicOverlayer
             return found;
         }
 
+        /// <summary>Bits per sample of the device's format (a WAVEFORMATEX blob), or 0.</summary>
+        private static int BitsOf(IPropertyStore store)
+        {
+            PropVariant value;
+            if (store.GetValue(ref deviceFormat, out value) < 0) return 0;
+            try
+            {
+                return value.Type == BlobType ? BitsOfBlob(value) : 0;
+            }
+            finally
+            {
+                PropVariantClear(ref value);
+            }
+        }
+
+        internal static int BitsOfBlob(PropVariant value)
+        {
+            int size = value.Size;
+            IntPtr data = IntPtr.Size == 8 ? value.Reserved : new IntPtr(value.Word12);
+            if (data == IntPtr.Zero || size < 16) return 0;
+            int tag = (ushort)Marshal.ReadInt16(data, 0);
+            int bits = (ushort)Marshal.ReadInt16(data, 14);
+            int extra = size >= 18 ? (ushort)Marshal.ReadInt16(data, 16) : 0;
+            // WAVE_FORMAT_EXTENSIBLE: 24-bit sound in 32-bit slots says so here.
+            if (tag == ExtensibleFormat && extra >= 22 && size >= 20)
+            {
+                int valid = (ushort)Marshal.ReadInt16(data, 18);
+                if (valid > 0) bits = valid;
+            }
+            return bits;
+        }
+
         /// <summary>Id of VB-CABLE's playback side ("CABLE Input"), or null when it isn't there.</summary>
         public static string FindCableInput()
         {
             foreach (var output in Outputs())
             {
-                string name = output.Value;
-                if (name.IndexOf("CABLE Input", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                    name.IndexOf("VB-Audio", StringComparison.OrdinalIgnoreCase) >= 0) return output.Key;
+                if (IsCable(output.Value, "CABLE Input")) return output.Key;
             }
             return null;
         }

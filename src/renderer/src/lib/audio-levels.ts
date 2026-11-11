@@ -51,6 +51,10 @@ class AudioLevels {
   private releaseTimer = 0
   private frameInterval = 1000 / 60
   private lastFrameAt = 0
+  /** The display's own frame interval, measured from frames asked for back to back. */
+  private displayInterval = 1000 / 60
+  private lastCallbackAt = 0
+  private backToBack = false
   /** The music-only equalizer's own analyser: just the music, no capture needed. */
   private external: AnalyserNode | null = null
 
@@ -111,20 +115,23 @@ class AudioLevels {
   }
 
   /**
-   * Below the display's rate, sleep until the next frame is due instead of asking for every
-   * frame and skipping some: each animation-frame request makes Chromium produce a frame, so
-   * skipping would still wake the page and the GPU 60 times a second.
+   * Below the display's rate, sleep until about one display frame before the next one is due,
+   * then ask for it, instead of asking for every frame and skipping some: each animation-frame
+   * request makes Chromium produce a frame, so skipping would still wake the page and the GPU
+   * at the display's full rate. At the display's own rate, just ask: one wake-up per frame.
    */
   private scheduleNext(now: number): void {
-    const delay = this.lastFrameAt + this.frameInterval - now - 8
-    if (delay <= 0) {
+    const due = this.lastFrameAt + this.frameInterval
+    if (due - now <= this.displayInterval * 1.25) {
+      this.backToBack = true
       this.raf = requestAnimationFrame(this.frame)
       return
     }
+    this.backToBack = false
     this.wait = window.setTimeout(() => {
       this.wait = 0
       this.raf = requestAnimationFrame(this.frame)
-    }, delay)
+    }, due - this.displayInterval / 2 - now)
   }
 
   /** Called when the loopback stream dies (e.g. the output device changed). */
@@ -240,12 +247,21 @@ class AudioLevels {
     }
   }
 
-  private frame = (now: number): void => {
+  private frame = (timestamp: number): void => {
     this.raf = 0
     if (this.listeners.size === 0) return
-    // Too early (the display runs faster than the cap): wait for the next one. 1 ms of slack
-    // keeps a 60 Hz display at a steady 60.
-    if (now - this.lastFrameAt < this.frameInterval - 1) {
+    // Pacing goes by the clock: a frame's own timestamp can be a display frame old when
+    // Chromium draws it straight away.
+    const now = performance.now()
+    // Frames asked for back to back arrive one display frame apart: that's the display's rate.
+    if (this.backToBack && this.lastCallbackAt > 0) {
+      const gap = timestamp - this.lastCallbackAt
+      if (gap > 2 && gap < 60) this.displayInterval += (gap - this.displayInterval) * 0.2
+    }
+    this.lastCallbackAt = timestamp
+    // Too early (the display runs faster than the cap): wait. Within half a display frame of
+    // being due counts as due, though: skipping it would only cost another wake-up and frame.
+    if (now - this.lastFrameAt < this.frameInterval - this.displayInterval / 2) {
       this.scheduleNext(now)
       return
     }

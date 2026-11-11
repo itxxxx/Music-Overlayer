@@ -1,5 +1,5 @@
 import { useId, useMemo } from 'react'
-import { EQ_BANDS, EQ_MAX_DB, EQ_MIN_DB, eqResponseDb } from '../../../../shared/eq'
+import { EQ_MAX_DB, EQ_MIN_DB } from '../../../../shared/eq'
 import { cn } from '@/lib/utils'
 
 interface ResponseCurveProps {
@@ -15,30 +15,35 @@ interface ResponseCurveProps {
   className?: string
 }
 
-const FIRST = Math.log2(EQ_BANDS[0])
-const LAST = Math.log2(EQ_BANDS[EQ_BANDS.length - 1])
-
 /**
- * The equalizer's real combined frequency response (the same peaking filters Equalizer APO
- * runs), drawn behind the sliders on the same frequency and dB scale.
+ * A smooth curve through the sliders' handles, behind them, on the same dB scale: what you set,
+ * at a glance. It goes exactly through every handle without overshooting between them (a
+ * monotone cubic), and runs on flat past the first and last band, so the same level on every
+ * band is a straight line.
  */
 export function ResponseCurve({ gains, edgeInset, verticalInset, width, height, tint, dimmed, className }: ResponseCurveProps) {
   const gradientId = `eq-fill-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
   const { line, area, zeroY } = useMemo(() => {
     const travel = height - verticalInset * 2
     const toY = (db: number) => verticalInset + (1 - (db - EQ_MIN_DB) / (EQ_MAX_DB - EQ_MIN_DB)) * travel
-    const xSpan = width - edgeInset * 2
-    const points: string[] = []
-    for (let x = 0; x <= width; x += 3) {
-      const octave = FIRST + ((x - edgeInset) / xSpan) * (LAST - FIRST)
-      const freq = Math.min(22000, Math.max(16, Math.pow(2, octave)))
-      const db = Math.max(EQ_MIN_DB, Math.min(EQ_MAX_DB, eqResponseDb(freq, gains)))
-      points.push(`${x.toFixed(1)},${toY(db).toFixed(2)}`)
+    // The handles: one per band, spread like the sliders (evenly, centre to centre).
+    const count = gains.length
+    const gap = count > 1 ? (width - edgeInset * 2) / (count - 1) : 0
+    const xs = gains.map((_, i) => edgeInset + i * gap)
+    const ys = gains.map((db) => toY(Math.max(EQ_MIN_DB, Math.min(EQ_MAX_DB, db))))
+    const slopes = monotoneSlopes(ys, gap)
+    const f = (n: number) => n.toFixed(2)
+    // Flat from the left edge to the first handle, cubic pieces between handles, flat to the right edge.
+    let path = `M0,${f(ys[0] ?? toY(0))} L${f(xs[0] ?? 0)},${f(ys[0] ?? toY(0))}`
+    for (let i = 0; i < count - 1; i++) {
+      const third = gap / 3
+      path += ` C${f(xs[i] + third)},${f(ys[i] + slopes[i] * third)} ${f(xs[i + 1] - third)},${f(ys[i + 1] - slopes[i + 1] * third)} ${f(xs[i + 1])},${f(ys[i + 1])}`
     }
+    path += ` L${f(width)},${f(ys[count - 1] ?? toY(0))}`
     const zero = toY(0)
     return {
-      line: `M${points.join(' L')}`,
-      area: `M0,${zero} L${points.join(' L')} L${width},${zero} Z`,
+      line: path,
+      area: `${path} L${f(width)},${f(zero)} L0,${f(zero)} Z`,
       zeroY: zero
     }
   }, [gains, edgeInset, verticalInset, width, height])
@@ -63,4 +68,23 @@ export function ResponseCurve({ gains, edgeInset, verticalInset, width, height, 
       <path d={line} fill="none" stroke={tint} strokeOpacity="0.9" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   )
+}
+
+/**
+ * Slopes at each point for a monotone cubic through evenly spaced points (Fritsch-Carlson): flat
+ * at a peak, a dip or a level stretch, and never steep enough to overshoot. Flat at both ends,
+ * where the curve carries on level.
+ */
+function monotoneSlopes(ys: readonly number[], gap: number): number[] {
+  const n = ys.length
+  const slopes = new Array<number>(n).fill(0)
+  if (n < 3 || gap <= 0) return slopes
+  const secants = ys.slice(1).map((y, i) => (y - ys[i]) / gap)
+  for (let i = 1; i < n - 1; i++) {
+    const before = secants[i - 1]
+    const after = secants[i]
+    // Equal spacing: the harmonic mean of the two secants, or flat where they disagree.
+    slopes[i] = before * after <= 0 ? 0 : (2 * before * after) / (before + after)
+  }
+  return slopes
 }

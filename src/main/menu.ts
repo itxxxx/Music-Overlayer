@@ -149,7 +149,7 @@ export function buildMenu(ctx: MenuContext): Menu {
         { label: 'Choose speakers and headphones…', enabled: eqStatus.canOpenEditor, click: () => ctx.openDevicePicker() },
         { label: 'Open Equalizer APO editor', enabled: eqStatus.canOpenEditor, click: () => ctx.openApoEditor() },
         { type: 'separator' },
-        { label: 'Unlink Music Overlayer', enabled: eqStatus.connected, click: () => ctx.unlinkApo() }
+        { label: `Unlink ${APP_NAME}`, enabled: eqStatus.connected, click: () => ctx.unlinkApo() }
       ]
     })
   }
@@ -158,8 +158,8 @@ export function buildMenu(ctx: MenuContext): Menu {
     { label: 'Reset position', click: () => ctx.resetPosition() },
     { type: 'separator' },
     updateItem(ctx),
-    { label: 'Restart Music Overlayer', click: () => ctx.restart() },
-    { label: 'Quit Music Overlayer', click: () => ctx.quit() }
+    { label: `Restart ${APP_NAME}`, click: () => ctx.restart() },
+    { label: `Quit ${APP_NAME}`, click: () => ctx.quit() }
   )
   return Menu.buildFromTemplate(template)
 }

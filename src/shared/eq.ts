@@ -8,6 +8,8 @@ export const EQ_MIN_DB = -12
 export const EQ_MAX_DB = 12
 export const PREAMP_MIN_DB = -12
 export const PREAMP_MAX_DB = 6
+/** Longest name for a saved preset, in characters. */
+export const PRESET_NAME_MAX = 40
 
 export interface EqPreset {
   id: string
@@ -53,6 +55,26 @@ function roundHalf(value: number): number {
   return Math.round(value * 2) / 2
 }
 
+/**
+ * A preset name as typed, tidied up: spaces trimmed and runs of them (or tabs, line breaks)
+ * made one, cut to PRESET_NAME_MAX characters. Anything else is kept as typed. `fallback` when
+ * nothing is left.
+ */
+export function cleanPresetName(name: unknown, fallback: string): string {
+  const text = typeof name === 'string' ? name : ''
+  // Control characters out (they can't be typed, but the settings file could hold anything).
+  const cleaned = text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
+  // Cut whole characters, so an emoji at the end isn't split in half.
+  const cut = Array.from(cleaned).slice(0, PRESET_NAME_MAX).join('').trim()
+  return cut || fallback
+}
+
+/** "My preset N" with the next free number, for a preset saved without a name. */
+export function defaultPresetName(userPresets: readonly EqUserPreset[]): string {
+  const numbers = userPresets.map((p) => Number(/^My preset (\d+)$/.exec(p.name)?.[1] ?? 0))
+  return `My preset ${Math.max(0, ...numbers) + 1}`
+}
+
 export function sanitizeGains(gains: unknown): number[] {
   const list = Array.isArray(gains) ? gains : []
   return EQ_BANDS.map((_, i) => roundHalf(clamp(finite(list[i], 0), EQ_MIN_DB, EQ_MAX_DB)))
@@ -67,7 +89,7 @@ export function sanitizeEq(input: unknown): EqSettings {
         .slice(0, 24)
         .map((p) => ({
           id: String(p.id).slice(0, 40),
-          name: String(p.name ?? 'My preset').slice(0, 40),
+          name: cleanPresetName(p.name, 'My preset'),
           gains: sanitizeGains(p.gains)
         }))
     : []
